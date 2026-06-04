@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Westfield Newmarket People Movement Simulation</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Controls -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h1>Westfield Newmarket</h1>
+                <p>Auckland, NZ • Pedestrian Simulation</p>
+            </div>
+            
+            <div class="sidebar-content">
+                <!-- Controls Section -->
+                <div class="section">
+                    <div class="section-title">
+                        Control Console
+                        <span id="sim-status">Paused</span>
+                    </div>
+                    
+                    <div class="sim-actions">
+                        <button id="btn-start" class="btn btn-primary">Start Simulation</button>
+                        <button id="btn-reset" class="btn btn-danger">Reset</button>
+                    </div>
+                </div>
+
+                <!-- Simulation Config Section -->
+                <div class="section">
+                    <div class="section-title">Global Settings</div>
+                    
+                    <!-- Algorithm Select -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Routing Algorithm
+                        </div>
+                        <select id="select-algo">
+                            <option value="goal_oriented">Goal-Oriented (Shortest Path)</option>
+                            <option value="gravity">Gravity Choice Model</option>
+                            <option value="random">Random Walk</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Sim Speed -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Simulation Speed
+                            <span class="control-val" id="val-sim-speed">5x</span>
+                        </div>
+                        <input type="range" id="input-sim-speed" min="1" max="20" value="5" />
+                    </div>
+
+                    <!-- Max Agents -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Max Active Agents
+                            <span class="control-val" id="val-max-agents">200</span>
+                        </div>
+                        <input type="range" id="input-max-agents" min="10" max="500" value="200" step="10" />
+                    </div>
+                    
+                    <!-- Spawn Rate -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Spawn Rate (agents/min)
+                            <span class="control-val" id="val-spawn-rate">60</span>
+                        </div>
+                        <input type="range" id="input-spawn-rate" min="5" max="300" value="60" step="5" />
+                    </div>
+
+                    <!-- Walking Speed -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Base Speed (m/s)
+                            <span class="control-val" id="val-walk-speed">1.3</span>
+                        </div>
+                        <input type="range" id="input-walk-speed" min="0.5" max="3.0" value="1.3" step="0.1" />
+                    </div>
+                </div>
+
+                <!-- Visualization Toggles -->
+                <div class="section">
+                    <div class="section-title">Overlay Elements</div>
+                    <div class="toggle-group">
+                        <div class="toggle-label">Render Walk Paths</div>
+                        <label class="switch">
+                            <input type="checkbox" id="chk-show-paths" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <div class="toggle-label">Render Network Graph</div>
+                        <label class="switch">
+                            <input type="checkbox" id="chk-show-graph">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Attractiveness Weights -->
+                <div class="section">
+                    <div class="section-title">Destination Weights</div>
+                    
+                    <div class="control-group">
+                        <div class="control-label">
+                            Farmers (Anchor)
+                            <span class="control-val" id="val-wt-farmers">90%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="90" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            David Jones (Anchor)
+                            <span class="control-val" id="val-wt-davidjones">90%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="90" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            H&M (Anchor)
+                            <span class="control-val" id="val-wt-hm">70%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="70" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            Woolworths (Supermarket)
+                            <span class="control-val" id="val-wt-woolworths">80%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-woolworths" min="0" max="100" value="80" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            JB Hi-Fi / Electronics
+                            <span class="control-val" id="val-wt-jbhifi">85%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-jbhifi" min="0" max="100" value="85" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            Food Court / Dining
+                            <span class="control-val" id="val-wt-foodcourt">95%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="95" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            Specialty Retail
+                            <span class="control-val" id="val-wt-specialty">30%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="30" />
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Floor Selector Overlay -->
+        <div class="floor-selector">
+            <button class="floor-btn active" data-floor="1">Level 1</button>
+            <button class="floor-btn" data-floor="2">Level 2</button>
+            <button class="floor-btn" data-floor="3">Level 3</button>
+        </div>
+
+        <!-- Interactive Map Container -->
+        <div class="map-container">
+            <div id="map"></div>
+        </div>
+
+        <!-- Stats and Panel Detection Panel (Right Floating Panel) -->
+        <div class="stats-panel">
+            <div class="stats-panel-header">
+                <h2>Simulation Metrics</h2>
+                <div class="pulse-dot"></div>
+            </div>
+
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-card-title">Total Spawns</div>
+                    <div class="stat-card-val neon-purple" id="stat-total-spawns">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-title">Active Agents</div>
+                    <div class="stat-card-val neon-blue" id="stat-active-agents">0</div>
+                </div>
+            </div>
+
+            <!-- Detection Panels -->
+            <div class="panels-section">
+                <div class="panels-title">Detection Panels</div>
+                <div class="panel-list" id="panel-list-container">
+                    <!-- Panel list will be dynamically rendered -->
+                </div>
+
+                <div class="crossing-summary">
+                    <div class="crossing-summary-title">Unique Agents Crossed</div>
+                    <div class="crossing-summary-val" id="unique-cross-count">0</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Simulation Application Logic -->
+    <script src="app.js"></script>
+</body>
+</html>
