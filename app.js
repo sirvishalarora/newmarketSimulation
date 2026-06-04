@@ -1,85 +1,36 @@
-// Westfield Newmarket Pedestrian Simulation Engine
+// Westfield Newmarket Pedestrian Gravity Simulation Engine (Headless Mode with Map Overlays)
 
 // Constants
 const LAT_DEG_TO_M = 111000.0;
 const LON_DEG_TO_M = 88800.0; // at Auckland latitude
 
-// Global Panels list (loaded from CSV)
-let panels = [];
-
-// Parse CSV helper
-function parseCSV(text) {
-    const lines = text.split("\n");
-    if (lines.length === 0) return [];
-    
-    // Clean headers
-    const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ''));
-    const result = [];
-    
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        
-        // Simple comma split (assuming no commas inside quotes)
-        const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ''));
-        const obj = {};
-        for (let j = 0; j < headers.length; j++) {
-            obj[headers[j]] = cols[j] || "";
-        }
-        result.push(obj);
-    }
-    return result;
-}
-
-// Load panel locations from CSV
-function loadPanels() {
-    return fetch('panel_locations_with_floor.csv')
-        .then(response => response.text())
-        .then(csvText => {
-            const parsed = parseCSV(csvText);
-            panels = parsed.map(row => ({
-                id: row.panel_id,
-                name: `Panel ${row.panel_id} (O: ${row.orientation}°)`,
-                lon: parseFloat(row.longitude),
-                lat: parseFloat(row.latitude),
-                floor: row.floor.trim(),
-                orientation: row.orientation,
-                crossedAgents: new Set(),
-                marker: null
-            }));
-            console.log(`Loaded ${panels.length} panels from CSV.`);
-            renderPanelListUI();
-            renderPanelMarkers();
-            renderPanelCones();
-        })
-        .catch(err => {
-            console.error("Error loading CSV panels:", err);
-            panels = [];
-        });
-}
-
-// Simulation State
+// Global Simulation & Map State
 let map;
 let geojsonData;
 let graphData;
-let adjacencyList = {};
 let nodesMap = {};
+let adjacencyList = {};
+let distanceMatrix = {}; // sourceNodeId -> { targetNodeId: distance }
+let pathCache = {}; // sourceNodeId -> { targetNodeId: pathArray }
+let panels = [];
+
+// Map Layer groups
+let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.featureGroup() };
+let graphLayer = L.layerGroup();
+let panelLayer = L.layerGroup();
+let coneLayer = L.layerGroup();
 let activeFloor = "1";
-let isRunning = false;
-let agents = [];
-let totalSpawns = 0;
-let lastSpawnTime = 0;
-let lastUpdateTime = 0;
+let showGraph = false;
 
 // UI Configuration Parameters
-let simSpeedMultiplier = 5;
-let maxActiveAgents = 200;
-let spawnRatePerMin = 60;
+let totalAgentsToSimulate = 50000;
+let minShopVisits = 2;
+let maxShopVisits = 4;
 let baseWalkSpeedMS = 1.3;
-let showGraph = false;
-let showPaths = true;
+let decayExponent = 1.3;
+let maxViewingDistance = 15.0;
+let viewingConeAngle = 60.0;
 
-// Attractiveness weights
 let categoryWeights = {
     farmers: 0.9,
     davidjones: 0.9,
@@ -90,19 +41,38 @@ let categoryWeights = {
     specialty: 0.3
 };
 
-// Map Layers
-let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.featureGroup() };
-let graphLayer = L.layerGroup();
-let agentLayer = L.layerGroup();
-let panelLayer = L.layerGroup();
-let coneLayer = L.layerGroup();
+// Simulation Execution Statistics
+let simulatedAgentsData = [];
+let shopCategoryVisits = {
+    farmers: 0,
+    davidjones: 0,
+    hm: 0,
+    woolworths: 0,
+    jbhifi: 0,
+    foodcourt: 0,
+    specialty: 0
+};
+let floorDetections = {
+    "1": new Set(),
+    "2": new Set(),
+    "3": new Set()
+};
 
-// Viewing Corridor config
-let maxViewingDistance = 15.0; // meters
-let viewingConeAngle = 60.0; // degrees
-let showCones = true;
+// Chart instances
+let storeVisitsChart = null;
+let floorCrossingsChart = null;
 
-// Priority Queue for Dijkstra
+// Search & Filter Setup Screen
+let currentSearchQuery = "";
+
+// Helper: Distance in meters
+function distanceM(p1, p2) {
+    const dx = (p1[0] - p2[0]) * LON_DEG_TO_M;
+    const dy = (p1[1] - p2[1]) * LAT_DEG_TO_M;
+    return Math.hypot(dx, dy);
+}
+
+// Simple Priority Queue for Dijkstra
 class PriorityQueue {
     constructor() {
         this.values = [];
@@ -122,57 +92,26 @@ class PriorityQueue {
     }
 }
 
-// Distance helper
-function distanceM(p1, p2) {
-    const dx = (p1[0] - p2[0]) * LON_DEG_TO_M;
-    const dy = (p1[1] - p2[1]) * LAT_DEG_TO_M;
-    return Math.hypot(dx, dy);
-}
-
-// Dijkstra Pathfinding Algorithm
-function findShortestPath(startNodeId, endNodeId) {
-    if (!adjacencyList[startNodeId] || !adjacencyList[endNodeId]) return [];
+// Parse CSV Helper
+function parseCSV(text) {
+    const lines = text.split("\n");
+    if (lines.length === 0) return [];
     
-    const dist = {};
-    const prev = {};
-    const queue = new PriorityQueue();
+    const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ''));
+    const result = [];
     
-    // Initialize
-    for (const nodeId in nodesMap) {
-        dist[nodeId] = Infinity;
-        prev[nodeId] = null;
-    }
-    dist[startNodeId] = 0;
-    queue.enqueue(startNodeId, 0);
-    
-    while (!queue.isEmpty()) {
-        const u = queue.dequeue();
-        if (u === endNodeId) break;
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
         
-        const neighbors = adjacencyList[u];
-        if (!neighbors) continue;
-        
-        for (const edge of neighbors) {
-            const v = edge.target;
-            const alt = dist[u] + edge.weight;
-            if (alt < dist[v]) {
-                dist[v] = alt;
-                prev[v] = u;
-                queue.enqueue(v, alt);
-            }
+        const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ''));
+        const obj = {};
+        for (let j = 0; j < headers.length; j++) {
+            obj[headers[j]] = cols[j] || "";
         }
+        result.push(obj);
     }
-    
-    // Reconstruct path
-    const path = [];
-    let curr = endNodeId;
-    if (prev[curr] !== null || curr === startNodeId) {
-        while (curr !== null) {
-            path.unshift(curr);
-            curr = prev[curr];
-        }
-    }
-    return path;
+    return result;
 }
 
 // Initialize Leaflet Map
@@ -191,33 +130,56 @@ function initMap() {
         maxZoom: 20
     }).addTo(map);
     
-    // Add layers to map
+    // Add default layers to map
     floorLayers["1"].addTo(map);
-    agentLayer.addTo(map);
     panelLayer.addTo(map);
     coneLayer.addTo(map);
+    
+    // Ensure Leaflet layout updates sizes correctly
+    setTimeout(() => {
+        map.invalidateSize();
+    }, 200);
 }
 
 // Load and Render Westfield Newmarket GeoJSON layouts
 function loadGeoJSON() {
-    fetch('Westfield_NewMarket_topology_4326.geojson')
-        .then(response => response.json())
+    console.log("Fetching mall topology GeoJSON...");
+    return fetch('Westfield_NewMarket_topology_4326.geojson')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load GeoJSON topology: HTTP ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             geojsonData = data;
+            console.log(`Loaded GeoJSON topology. Total features: ${data.features ? data.features.length : 0}`);
             
             L.geoJSON(geojsonData, {
+                pointToLayer: function(feature, latlng) {
+                    // Render Point features (entrances/exits) as small circle markers to bypass CDN marker image loading issues
+                    const props = feature.properties || {};
+                    const isEntrance = !!props.entrance;
+                    return L.circleMarker(latlng, {
+                        radius: isEntrance ? 6 : 4,
+                        fillColor: isEntrance ? '#10b981' : '#6366f1',
+                        color: isEntrance ? '#059669' : '#4f46e5',
+                        weight: 1.5,
+                        opacity: 0.9,
+                        fillOpacity: 0.7
+                    });
+                },
                 style: function(feature) {
-                    const props = feature.properties;
+                    const props = feature.properties || {};
                     const indoor = props.indoor;
-                    const name = props.name || "";
                     
                     if (indoor === "corridor") {
                         return {
-                            fillColor: '#475569',
-                            fillOpacity: 0.22,
-                            color: '#64748b',
+                            fillColor: '#334155', // slate-700 for distinct contrast
+                            fillOpacity: 0.35,
+                            color: 'rgba(255, 255, 255, 0.12)',
                             weight: 1,
-                            dashArray: '4'
+                            dashArray: '3, 5'
                         };
                     } else if (props.highway === "steps") {
                         return {
@@ -238,25 +200,24 @@ function loadGeoJSON() {
                             fillColor: '#059669',
                             fillOpacity: 0.6,
                             color: '#10b981',
-                            weight: 1
+                            weight: 1.5
                         };
                     } else {
-                        // Regular shop
+                        // Regular shop: beautiful premium glowing design
                         return {
-                            fillColor: '#1e293b',
-                            fillOpacity: 0.65,
-                            color: 'rgba(255, 255, 255, 0.08)',
-                            weight: 1
+                            fillColor: '#0f172a', // slate-900 (deep dark blue-grey)
+                            fillOpacity: 0.75,
+                            color: 'rgba(99, 102, 241, 0.35)', // Sleek Indigo border (high contrast & premium look)
+                            weight: 1.2
                         };
                     }
                 },
                 onEachFeature: function(feature, layer) {
-                    const props = feature.properties;
+                    const props = feature.properties || {};
                     const level = props.level || "1";
                     
                     // Bind tooltips for shop names
                     if (props.name && props.indoor === "room") {
-                        // Format clean display name
                         let dispName = props.name.replace(/_lv[1-3].*/, '').replace(/_/g, ' ');
                         dispName = dispName.charAt(0).toUpperCase() + dispName.slice(1);
                         layer.bindTooltip(dispName, {
@@ -276,17 +237,28 @@ function loadGeoJSON() {
             // Zoom to fit bounds
             const bounds = floorLayers["1"].getBounds();
             if (bounds.isValid()) {
-                map.fitBounds(bounds, { padding: [20, 20] });
+                map.fitBounds(bounds, { padding: [10, 10] });
             }
+        })
+        .catch(err => {
+            console.error("Error rendering GeoJSON:", err);
+            throw err;
         });
 }
 
 // Load Network Graph and build connectivity lists
 function loadGraph() {
-    fetch('newmarket_graph.json')
-        .then(response => response.json())
+    console.log("Fetching newmarket network graph JSON...");
+    return fetch('newmarket_graph.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load graph JSON: HTTP ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             graphData = data;
+            console.log(`Loaded network graph. Nodes: ${data.nodes.length}, Edges: ${data.edges.length}`);
             
             // Build Nodes Map and Adjacency list
             graphData.nodes.forEach(node => {
@@ -305,13 +277,17 @@ function loadGraph() {
                 }
             });
             
-            // Render Graph overlay
             renderGraphOverlay();
+        })
+        .catch(err => {
+            console.error("Error loading network graph:", err);
+            throw err;
         });
 }
 
 // Draw the network graph links faintly on the map
 function renderGraphOverlay() {
+    if (typeof L === 'undefined' || !map) return;
     graphLayer.clearLayers();
     if (!graphData) return;
     
@@ -320,16 +296,14 @@ function renderGraphOverlay() {
         const tNode = nodesMap[edge.target];
         if (!sNode || !tNode) return;
         
-        // Render if edge level matches active floor
-        // Handle floor transit links (render on both floors)
         const isTransit = sNode.level !== tNode.level;
         const matchesLevel = sNode.level === activeFloor || tNode.level === activeFloor;
         
         if (matchesLevel) {
             const color = isTransit ? '#c084fc' : '#8b5cf6';
-            const weight = isTransit ? 2 : 0.8;
+            const weight = isTransit ? 1.5 : 0.8;
             const dashArray = isTransit ? '3, 5' : '1';
-            const opacity = isTransit ? 0.6 : 0.15;
+            const opacity = isTransit ? 0.5 : 0.12;
             
             const line = L.polyline(
                 [[sNode.y, sNode.x], [tNode.y, tNode.x]],
@@ -340,533 +314,92 @@ function renderGraphOverlay() {
     });
     
     if (showGraph) {
-        graphLayer.addTo(map);
+        if (!map.hasLayer(graphLayer)) map.addLayer(graphLayer);
+    } else {
+        if (map.hasLayer(graphLayer)) map.removeLayer(graphLayer);
     }
 }
 
-// Get store category by name
-function getStoreCategory(name) {
-    if (!name) return "specialty";
-    const nameLower = name.toLowerCase();
-    
-    if (nameLower.includes("farmers")) return "farmers";
-    if (nameLower.includes("davidjones") || nameLower.includes("david jones")) return "davidjones";
-    if (nameLower.includes("handm") || nameLower.includes("h&m") || nameLower.includes("hm")) return "hm";
-    if (nameLower.includes("woolworths") || nameLower.includes("countdown")) return "woolworths";
-    if (nameLower.includes("jbhifi") || nameLower.includes("jb hifi") || nameLower.includes("jb hi-fi")) return "jbhifi";
-    if (nameLower.includes("food_court") || nameLower.includes("foodcourt")) return "foodcourt";
-    
-    return "specialty";
-}
-
-// Select target destination shop based on weights and/or gravity model
-function selectTargetShop(agent, algorithm) {
-    const level = agent.level;
-    
-    // Get all shop entry nodes
-    const shopNodes = Object.values(nodesMap).filter(n => n.type === "shop_entry");
-    if (shopNodes.length === 0) return null;
-    
-    const candidates = [];
-    let totalWeight = 0;
-    
-    const currentLoc = [nodesMap[agent.currentNodeId].x, nodesMap[agent.currentNodeId].y];
-    
-    shopNodes.forEach(node => {
-        // Do not choose same shop
-        if (node.id === agent.lastVisitedShopId) return;
-        
-        const cat = getStoreCategory(node.name);
-        let baseWt = categoryWeights[cat] || 0.3;
-        
-        // Turn weight slider percentages into fraction
-        baseWt = Math.max(0.001, baseWt); 
-        
-        if (algorithm === "gravity") {
-            // Gravity Model: P(S) ~ Attraction / Dist^1.5
-            const dist = distanceM(currentLoc, [node.x, node.y]);
-            
-            // Avoid divide by 0 if agent is right on shop entry
-            const distFactor = Math.max(2.0, dist);
-            const wt = baseWt / Math.pow(distFactor, 1.3); // decay factor 1.3
-            candidates.push({ node, weight: wt });
-            totalWeight += wt;
-        } else {
-            // Normal Goal-Oriented Choice
-            candidates.push({ node, weight: baseWt });
-            totalWeight += baseWt;
-        }
-    });
-    
-    if (totalWeight === 0) return shopNodes[Math.floor(Math.random() * shopNodes.length)];
-    
-    // Roulette wheel selection
-    let r = Math.random() * totalWeight;
-    for (const cand of candidates) {
-        r -= cand.weight;
-        if (r <= 0) return cand.node;
-    }
-    
-    return candidates[candidates.length - 1].node;
-}
-
-// Agent class containing simulation properties and update loop
-class Agent {
-    constructor() {
-        totalSpawns++;
-        this.id = `agent_${totalSpawns}`;
-        
-        // Find a random mall entrance to spawn
-        const spawnNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
-        const startNode = spawnNodes[Math.floor(Math.random() * spawnNodes.length)];
-        
-        this.currentNodeId = startNode.id;
-        this.level = startNode.level;
-        this.x = startNode.x;
-        this.y = startNode.y;
-        
-        // Configurable base speed + small variation (1.1m/s to 1.6m/s)
-        this.speedMS = baseWalkSpeedMS * (0.85 + Math.random() * 0.3);
-        
-        this.status = "active";
-        this.visitedCount = 0;
-        this.lastVisitedShopId = null;
-        this.maxVisits = 2 + Math.floor(Math.random() * 3); // shop visits count before exiting (2 to 4)
-        
-        this.path = [];
-        this.pathIndex = 0;
-        this.segmentProgress = 0; // time elapsed in current edge traversal
-        this.segmentDuration = 0; // total time required for current edge
-        this.prevNodePos = [this.x, this.y];
-        this.nextNodePos = [this.x, this.y];
-        
-        // Create circle marker on map
-        // Render on canvas to support hundreds of agents smoothly
-        this.marker = L.circleMarker([this.y, this.x], {
-            renderer: L.canvas(),
-            radius: 5,
-            fillColor: this.getFloorColor(this.level),
-            color: '#ffffff',
-            weight: 1,
-            fillOpacity: 0.85
-        });
-        
-        // Show tooltip on hover
-        this.marker.bindTooltip(`Agent #${totalSpawns}<br>Level: ${this.level}<br>Speed: ${this.speedMS.toFixed(2)} m/s`, {
-            direction: 'top'
-        });
-        
-        // Only draw if agent level matches active floor view
-        if (this.level === activeFloor) {
-            this.marker.addTo(agentLayer);
-        }
-        
-        // Find first destination path
-        this.setNextDestination();
-    }
-    
-    getFloorColor(level) {
-        if (level === "1") return "#3b82f6"; // Blue
-        if (level === "2") return "#10b981"; // Green
-        if (level === "3") return "#d97706"; // Amber
-        return "#8b5cf6";
-    }
-    
-    setNextDestination() {
-        const algo = document.getElementById("select-algo").value;
-        
-        if (algo === "random") {
-            // Random Walk Algorithm: simply choose a random adjacent edge
-            const neighbors = adjacencyList[this.currentNodeId];
-            if (!neighbors || neighbors.length === 0) {
-                // Remove if trapped, should not happen in a connected graph
-                this.status = "finished";
-                return;
+// Load panel locations from CSV
+function loadPanels() {
+    console.log("Fetching panel locations CSV...");
+    return fetch('panel_locations_with_floor.csv')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load panels CSV: HTTP ${response.status}`);
             }
-            
-            const nextEdge = neighbors[Math.floor(Math.random() * neighbors.length)];
-            const nextNode = nodesMap[nextEdge.target];
-            
-            this.path = [this.currentNodeId, nextNode.id];
-            this.pathIndex = 0;
-            this.setupSegment(this.currentNodeId, nextNode.id);
-            return;
-        }
-        
-        // Goal-Oriented or Gravity model
-        if (this.visitedCount >= this.maxVisits) {
-            // Head to exit
-            const spawnNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
-            const exitNode = spawnNodes[Math.floor(Math.random() * spawnNodes.length)];
-            
-            this.path = findShortestPath(this.currentNodeId, exitNode.id);
-            this.pathIndex = 0;
-            
-            if (this.path.length <= 1) {
-                this.status = "finished";
-            } else {
-                this.setupSegment(this.path[0], this.path[1]);
-            }
-        } else {
-            // Select next target shop
-            const targetShop = selectTargetShop(this, algo);
-            if (!targetShop) {
-                this.status = "finished";
-                return;
-            }
-            
-            this.path = findShortestPath(this.currentNodeId, targetShop.id);
-            this.pathIndex = 0;
-            this.targetShopId = targetShop.id;
-            
-            if (this.path.length <= 1) {
-                // Directly touch if already adjacent
-                this.touchShopAndProceed();
-            } else {
-                this.setupSegment(this.path[0], this.path[1]);
-            }
-        }
-    }
-    
-    setupSegment(nodeId1, nodeId2) {
-        const n1 = nodesMap[nodeId1];
-        const n2 = nodesMap[nodeId2];
-        
-        this.prevNodePos = [n1.x, n1.y];
-        this.nextNodePos = [n2.x, n2.y];
-        
-        const dist = distanceM(this.prevNodePos, this.nextNodePos);
-        
-        this.segmentProgress = 0;
-        this.segmentDuration = dist / this.speedMS; // T = D / S
-        
-        this.level = n2.level;
-    }
-    
-    touchShopAndProceed() {
-        this.visitedCount++;
-        this.lastVisitedShopId = this.targetShopId;
-        
-        // With 0 dwell time: immediately pick next target shop (or exit) and return to corridor
-        this.setNextDestination();
-    }
-    
-    update(dt) {
-        if (this.status !== "active") return;
-        
-        // Tick time elapsed multiplied by simulation speed multiplier
-        const simDt = dt * simSpeedMultiplier;
-        this.segmentProgress += simDt;
-        
-        if (this.segmentProgress >= this.segmentDuration) {
-            // Arrived at next node in path segment
-            const nextNodeId = this.path[this.pathIndex + 1];
-            this.currentNodeId = nextNodeId;
-            this.x = this.nextNodePos[0];
-            this.y = this.nextNodePos[1];
-            
-            this.pathIndex++;
-            
-            // Check if we reached the final node of current path
-            if (this.pathIndex >= this.path.length - 1) {
-                const algo = document.getElementById("select-algo").value;
-                if (algo === "random") {
-                    // Random Walk updates node by node continuously
-                    this.setNextDestination();
-                } else if (this.visitedCount >= this.maxVisits) {
-                    // Reached mall exit
-                    this.status = "finished";
-                } else {
-                    // Reached shop entrance, touch it and pick new destination
-                    this.touchShopAndProceed();
-                }
-            } else {
-                // Setup next segment in current path
-                this.setupSegment(this.path[this.pathIndex], this.path[this.pathIndex + 1]);
-            }
-        } else {
-            // Interpolate position linearly along the segment coordinates
-            const t = this.segmentProgress / this.segmentDuration;
-            this.x = this.prevNodePos[0] + t * (this.nextNodePos[0] - this.prevNodePos[0]);
-            this.y = this.prevNodePos[1] + t * (this.nextNodePos[1] - this.prevNodePos[1]);
-        }
-        
-        // Update marker position
-        this.marker.setLatLng([this.y, this.x]);
-        
-        // Filter marker visibility on active floor switching
-        if (this.level === activeFloor) {
-            if (!map.hasLayer(this.marker)) {
-                this.marker.addTo(agentLayer);
-            }
-            
-            // Update color to match floor
-            this.marker.setStyle({ fillColor: this.getFloorColor(this.level) });
-        } else {
-            if (map.hasLayer(this.marker)) {
-                map.removeLayer(this.marker);
-            }
-        }
-        
-        // Verify path rendering if enabled
-        this.renderPathLine();
-        
-        // Run Panel detection check
-        this.checkPanelCrossing();
-    }
-    
-    renderPathLine() {
-        if (!showPaths || this.level !== activeFloor) {
-            if (this.pathLine) {
-                map.removeLayer(this.pathLine);
-                this.pathLine = null;
-            }
-            return;
-        }
-        
-        const pathCoords = [];
-        // Map remaining path nodes to lat/lons
-        for (let i = this.pathIndex; i < this.path.length; i++) {
-            const node = nodesMap[this.path[i]];
-            if (node && node.level === activeFloor) {
-                pathCoords.push([node.y, node.x]);
-            }
-        }
-        
-        // Add current interpolated position at the front of the line
-        pathCoords.unshift([this.y, this.x]);
-        
-        if (pathCoords.length > 1) {
-            if (this.pathLine) {
-                this.pathLine.setLatLngs(pathCoords);
-            } else {
-                this.pathLine = L.polyline(pathCoords, {
-                    color: this.getFloorColor(this.level),
-                    weight: 1.5,
-                    opacity: 0.35,
-                    dashArray: '3, 4'
-                }).addTo(agentLayer);
-            }
-        } else {
-            if (this.pathLine) {
-                map.removeLayer(this.pathLine);
-                this.pathLine = null;
-            }
-        }
-    }
-    
-    checkPanelCrossing() {
-        // Find active floor panels
-        panels.forEach(panel => {
-            if (panel.floor !== this.level) return;
-            
-            // Check if checkbox is selected for this panel
-            const chk = document.getElementById(`chk-${panel.id}`);
-            if (!chk || !chk.checked) return;
-            
-            // 1. Distance check using global maxViewingDistance parameter
-            const dx = (this.x - panel.lon) * LON_DEG_TO_M;
-            const dy = (this.y - panel.lat) * LAT_DEG_TO_M;
-            const dist = Math.hypot(dx, dy);
-            
-            if (dist > maxViewingDistance) return; // Outside viewing corridor range
-            
-            // 2. Position angle check (Agent must be in front of the panel)
-            // Convert panel orientation (compass degrees) to radian angle
-            const thetaRad = (parseFloat(panel.orientation) * Math.PI) / 180.0;
-            const panelNormalX = Math.sin(thetaRad);
-            const panelNormalY = Math.cos(thetaRad);
-            
-            // Normalized vector from panel to agent
-            const p2aX = dx / dist;
-            const p2aY = dy / dist;
-            
-            const dotProductPosition = p2aX * panelNormalX + p2aY * panelNormalY;
-            const cosCone = Math.cos((viewingConeAngle * Math.PI) / 180.0);
-            
-            if (dotProductPosition < cosCone) return; // Agent is behind or outside the panel's FOV cone
-            
-            // 3. Heading check (Agent must be walking towards the panel)
-            // Agent velocity vector
-            const hx = (this.nextNodePos[0] - this.prevNodePos[0]) * LON_DEG_TO_M;
-            const hy = (this.nextNodePos[1] - this.prevNodePos[1]) * LAT_DEG_TO_M;
-            const headingDist = Math.hypot(hx, hy);
-            
-            if (headingDist > 0.0001) { // Ensure agent is actually moving
-                const headingX = hx / headingDist;
-                const headingY = hy / headingDist;
-                
-                // Vector from agent to panel (normalized)
-                const a2pX = -p2aX;
-                const a2pY = -p2aY;
-                
-                const dotProductHeading = headingX * a2pX + headingY * a2pY;
-                if (dotProductHeading < cosCone) return; // Agent is walking away or past
-            }
-            
-            // Register interaction only if it is the first detection
-            if (!panel.crossedAgents.has(this.id)) {
-                panel.crossedAgents.add(this.id);
-                
-                // Trigger visual flash feedback
-                triggerPanelCrossingFeedback(panel.id);
-            }
-        });
-    }
-    
-    cleanup() {
-        if (map.hasLayer(this.marker)) {
-            map.removeLayer(this.marker);
-        }
-        if (this.pathLine) {
-            map.removeLayer(this.pathLine);
-        }
-    }
-}
-
-// UI trigger crossing animation and count update
-function triggerPanelCrossingFeedback(panelId) {
-    const el = document.getElementById(`item-${panelId}`);
-    if (el) {
-        el.classList.add("active-crossing");
-        // Flash panel badge count
-        const badge = el.querySelector(".panel-crossing-badge");
-        const panel = panels.find(p => p.id === panelId);
-        if (badge && panel) {
-            badge.textContent = panel.crossedAgents.size;
-        }
-        
-        // Remove active class after animation fades
-        setTimeout(() => {
-            el.classList.remove("active-crossing");
-        }, 1000);
-    }
-    
-    // Flash map marker
-    const panel = panels.find(p => p.id === panelId);
-    if (panel && panel.marker) {
-        const element = panel.marker.getElement();
-        if (element) {
-            const innerIcon = element.querySelector('.panel-marker-inner');
-            if (innerIcon) {
-                innerIcon.classList.add('detecting');
-                setTimeout(() => {
-                    innerIcon.classList.remove('detecting');
-                }, 1000);
-            }
-        }
-    }
-    
-    updateCrossingSummary();
-}
-
-// Calculate unique agents crossing the SELECTED set of panels (Set 2 Requirement)
-function updateCrossingSummary() {
-    const selectedActiveUnique = new Set();
-    
-    panels.forEach(panel => {
-        const chk = document.getElementById(`chk-${panel.id}`);
-        if (chk && chk.checked) {
-            panel.crossedAgents.forEach(agentId => {
-                selectedActiveUnique.add(agentId);
-            });
-        }
-    });
-    
-    document.getElementById("unique-cross-count").textContent = selectedActiveUnique.size;
-}
-
-// Render Panel list in the UI Sidebar
-function renderPanelListUI() {
-    const container = document.getElementById("panel-list-container");
-    container.innerHTML = "";
-    
-    panels.forEach(panel => {
-        const item = document.createElement("div");
-        item.className = "panel-item";
-        item.id = `item-${panel.id}`;
-        
-        item.innerHTML = `
-            <div class="panel-item-left">
-                <input type="checkbox" id="chk-${panel.id}" checked />
-                <span class="panel-name">${panel.name}</span>
-            </div>
-            <div class="panel-crossing-badge">0</div>
-        `;
-        
-        // Checkbox listener to update unique crossed counter immediately on toggle
-        item.querySelector("input").addEventListener("change", () => {
-            updateCrossingSummary();
-            updatePanelMarkersVisibility();
+            return response.text();
+        })
+        .then(csvText => {
+            const parsed = parseCSV(csvText);
+            panels = parsed.map(row => ({
+                id: row.panel_id,
+                name: `Panel ${row.panel_id}`,
+                lon: parseFloat(row.longitude),
+                lat: parseFloat(row.latitude),
+                floor: row.floor.trim(),
+                orientation: parseFloat(row.orientation),
+                crossedAgents: new Set(),
+                marker: null
+            }));
+            console.log(`Loaded ${panels.length} panels from CSV.`);
+            renderPanelsSelectionGrid();
+            renderPanelMarkers();
             renderPanelCones();
+        })
+        .catch(err => {
+            console.error("Error loading CSV panels:", err);
+            throw err;
         });
-        
-        container.appendChild(item);
-    });
 }
 
 // Draw panel markers on Leaflet map
 function renderPanelMarkers() {
+    if (typeof L === 'undefined' || !map) return;
     panelLayer.clearLayers();
     
     panels.forEach(panel => {
-        // Custom HTML pulsing marker
+        // Check checkbox state (setup selection or results screen selection)
+        const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? document.getElementById(`chk-${panel.id}`)?.checked ?? true;
+        
+        // Custom HTML Icon
         const customIcon = L.divIcon({
-            html: '<div class="panel-marker-inner"></div>',
+            html: `<div class="panel-marker-inner ${isChecked ? '' : 'inactive-marker'}" id="marker-inner-${panel.id}"></div>`,
             className: 'panel-map-marker',
-            iconSize: [20, 20]
+            iconSize: [16, 16]
         });
         
         const marker = L.marker([panel.lat, panel.lon], { icon: customIcon });
-        marker.bindTooltip(`${panel.name}<br>Floor: L${panel.floor}`, { direction: 'top' });
         
+        // Tooltip text
+        let tooltipContent = `<b>${panel.name}</b><br>Floor: L${panel.floor}<br>Orient: ${panel.orientation}°`;
+        if (panel.crossedAgents.size > 0) {
+            tooltipContent += `<br>Unique Crossed: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
+        }
+        marker.bindTooltip(tooltipContent, { direction: 'top' });
         panel.marker = marker;
         
-        // Show marker on map only if floor level matches and it is selected/active
+        // Show marker only if on active floor
         if (panel.floor === activeFloor) {
-            const chk = document.getElementById(`chk-${panel.id}`);
-            if (!chk || chk.checked) {
-                panelLayer.addLayer(marker);
-            }
-        }
-    });
-}
-
-// Hide/Show panel markers when active floor switches or checkboxes toggle
-function updatePanelMarkersVisibility() {
-    panels.forEach(panel => {
-        if (!panel.marker) return;
-        
-        const chk = document.getElementById(`chk-${panel.id}`);
-        const isActive = !chk || chk.checked;
-        const matchesLevel = panel.floor === activeFloor;
-        
-        if (matchesLevel && isActive) {
-            if (!panelLayer.hasLayer(panel.marker)) {
-                panelLayer.addLayer(panel.marker);
-            }
-        } else {
-            if (panelLayer.hasLayer(panel.marker)) {
-                panelLayer.removeLayer(panel.marker);
-            }
+            panelLayer.addLayer(marker);
         }
     });
 }
 
 // Draw the visual viewing corridor wedges (L.polygon sectors) on the Leaflet map
 function renderPanelCones() {
+    if (typeof L === 'undefined' || !map) return;
     coneLayer.clearLayers();
-    if (!showCones) return;
     
     panels.forEach(panel => {
         if (panel.floor !== activeFloor) return;
         
-        const chk = document.getElementById(`chk-${panel.id}`);
-        if (chk && !chk.checked) return;
+        const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? document.getElementById(`chk-${panel.id}`)?.checked ?? true;
+        if (!isChecked) return; // Hide cone if panel is unselected
         
         const centerLat = panel.lat;
         const centerLon = panel.lon;
-        const orient = parseFloat(panel.orientation);
+        const orient = panel.orientation;
         
         // Generate wedge vertices starting with center point
         const points = [[centerLat, centerLon]];
@@ -897,233 +430,983 @@ function renderPanelCones() {
     });
 }
 
-// Main Simulation Loop
-function updateSimulation() {
-    if (!isRunning) return;
+// Refresh panel markers and cones visual layout
+function updatePanelMapVisuals() {
+    if (typeof L === 'undefined' || !map) return;
+    renderPanelMarkers();
+    renderPanelCones();
+}
+
+// Run Dijkstra to find shortest path distances/prev nodes from a start node to all nodes
+function dijkstraAll(startNodeId) {
+    const dist = {};
+    const prev = {};
+    const queue = new PriorityQueue();
     
-    const now = performance.now();
-    let dt = (now - lastUpdateTime) / 1000.0; // seconds
+    for (const nodeId in nodesMap) {
+        dist[nodeId] = Infinity;
+        prev[nodeId] = null;
+    }
+    dist[startNodeId] = 0;
+    queue.enqueue(startNodeId, 0);
     
-    // Safety cap to avoid huge leaps during lags
-    if (dt > 0.1) dt = 0.1;
-    
-    lastUpdateTime = now;
-    
-    // 1. Spawning Agents
-    const spawnIntervalSec = 60.0 / spawnRatePerMin; // spawn delay in seconds
-    const elapsedSpawnTime = (now - lastSpawnTime) / 1000.0;
-    
-    if (elapsedSpawnTime >= spawnIntervalSec && agents.length < maxActiveAgents) {
-        if (graphData) {
-            const agent = new Agent();
-            agents.push(agent);
-            lastSpawnTime = now;
-            
-            document.getElementById("stat-total-spawns").textContent = totalSpawns;
+    while (!queue.isEmpty()) {
+        const u = queue.dequeue();
+        const uDist = dist[u];
+        
+        const neighbors = adjacencyList[u];
+        if (!neighbors) continue;
+        
+        for (const edge of neighbors) {
+            const v = edge.target;
+            const alt = uDist + edge.weight;
+            if (alt < dist[v]) {
+                dist[v] = alt;
+                prev[v] = u;
+                queue.enqueue(v, alt);
+            }
         }
     }
     
-    // 2. Update all active agents
-    const activeAgents = [];
-    agents.forEach(agent => {
-        agent.update(dt);
-        if (agent.status === "active") {
-            activeAgents.push(agent);
-        } else {
-            // Remove agent from map
-            agent.cleanup();
+    // Reconstruct paths for all nodes
+    const paths = {};
+    for (const targetNodeId in nodesMap) {
+        const path = [];
+        let curr = targetNodeId;
+        if (prev[curr] !== null || curr === startNodeId) {
+            while (curr !== null) {
+                path.unshift(curr);
+                curr = prev[curr];
+            }
         }
-    });
-    agents = activeAgents;
+        paths[targetNodeId] = path;
+    }
     
-    // 3. Update UI Metrics
-    document.getElementById("stat-active-agents").textContent = agents.length;
-    
-    // Recur loop using requestAnimationFrame for 60fps smoothness
-    requestAnimationFrame(updateSimulation);
+    return { distances: dist, paths: paths };
 }
 
-// Bind UI Control Event Listeners
-function bindUIEvents() {
-    // Start / Pause
-    const btnStart = document.getElementById("btn-start");
-    btnStart.addEventListener("click", () => {
-        if (isRunning) {
-            isRunning = false;
-            btnStart.textContent = "Resume Simulation";
-            btnStart.className = "btn btn-primary";
-            document.getElementById("sim-status").textContent = "Paused";
-            document.getElementById("sim-status").style.background = "rgba(245, 158, 11, 0.2)";
-            document.getElementById("sim-status").style.color = "#fbbf24";
-        } else {
-            isRunning = true;
-            btnStart.textContent = "Pause Simulation";
-            btnStart.className = "btn btn-secondary";
-            document.getElementById("sim-status").textContent = "Running";
-            document.getElementById("sim-status").style.background = "rgba(16, 185, 129, 0.2)";
-            document.getElementById("sim-status").style.color = "#34d399";
+// Precompute paths and distances between all entrance & shop decision nodes
+function precomputePaths() {
+    const decisionNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance" || n.type === "shop_entry");
+    
+    decisionNodes.forEach(node => {
+        const result = dijkstraAll(node.id);
+        distanceMatrix[node.id] = result.distances;
+        pathCache[node.id] = result.paths;
+    });
+    console.log(`Precomputed shortest paths for ${decisionNodes.length} source nodes.`);
+}
+
+// Get store category helper
+function getStoreCategory(name) {
+    if (!name) return "specialty";
+    const nameLower = name.toLowerCase();
+    
+    if (nameLower.includes("farmers")) return "farmers";
+    if (nameLower.includes("davidjones") || nameLower.includes("david jones")) return "davidjones";
+    if (nameLower.includes("handm") || nameLower.includes("h&m") || nameLower.includes("hm")) return "hm";
+    if (nameLower.includes("woolworths") || nameLower.includes("countdown")) return "woolworths";
+    if (nameLower.includes("jbhifi") || nameLower.includes("jb hifi") || nameLower.includes("jb hi-fi") || nameLower.includes("jb_hifi")) return "jbhifi";
+    if (nameLower.includes("food_court") || nameLower.includes("foodcourt")) return "foodcourt";
+    
+    return "specialty";
+}
+
+// Select target destination shop based on Huff's Gravity Model using precomputed graph distance
+function selectNextShopGravity(currentNodeId, lastVisitedShopId) {
+    const shopNodes = Object.values(nodesMap).filter(n => n.type === "shop_entry");
+    if (shopNodes.length === 0) return null;
+    
+    const candidates = [];
+    let totalWeight = 0;
+    
+    shopNodes.forEach(node => {
+        if (node.id === lastVisitedShopId) return;
+        
+        const cat = getStoreCategory(node.name);
+        let baseWt = categoryWeights[cat] || 0.3;
+        baseWt = Math.max(0.001, baseWt); 
+        
+        let dist = distanceMatrix[currentNodeId][node.id];
+        
+        if (dist === undefined || dist === Infinity) {
+            return;
+        }
+        
+        const distFactor = Math.max(2.0, dist);
+        const wt = baseWt / Math.pow(distFactor, decayExponent);
+        
+        candidates.push({ node, weight: wt });
+        totalWeight += wt;
+    });
+    
+    if (totalWeight === 0) return shopNodes[Math.floor(Math.random() * shopNodes.length)];
+    
+    let r = Math.random() * totalWeight;
+    for (const cand of candidates) {
+        r -= cand.weight;
+        if (r <= 0) return cand.node;
+    }
+    
+    return candidates[candidates.length - 1].node;
+}
+
+// Check if agent crosses a panel at (x, y) along a segment
+function checkPanelCrossing(x, y, floor, n1, n2, agentId, activePanelIds) {
+    const sameFloorPanels = panels.filter(p => p.floor === floor);
+    
+    sameFloorPanels.forEach(panel => {
+        if (!activePanelIds.has(panel.id)) return;
+        if (panel.crossedAgents.has(agentId)) return;
+        
+        // 1. Distance check
+        const dx = (x - panel.lon) * LON_DEG_TO_M;
+        const dy = (y - panel.lat) * LAT_DEG_TO_M;
+        const dist = Math.hypot(dx, dy);
+        
+        if (dist > maxViewingDistance) return; 
+        
+        // 2. Position angle check
+        const thetaRad = (panel.orientation * Math.PI) / 180.0;
+        const panelNormalX = Math.sin(thetaRad);
+        const panelNormalY = Math.cos(thetaRad);
+        
+        const p2aX = dx / dist;
+        const p2aY = dy / dist;
+        
+        const dotProductPosition = p2aX * panelNormalX + p2aY * panelNormalY;
+        const cosCone = Math.cos((viewingConeAngle * Math.PI) / 180.0);
+        
+        if (dotProductPosition < cosCone) return; 
+        
+        // 3. Heading check
+        const hx = (n2.x - n1.x) * LON_DEG_TO_M;
+        const hy = (n2.y - n1.y) * LAT_DEG_TO_M;
+        const headingDist = Math.hypot(hx, hy);
+        
+        if (headingDist > 0.0001) { 
+            const headingX = hx / headingDist;
+            const headingY = hy / headingDist;
             
-            lastUpdateTime = performance.now();
-            lastSpawnTime = performance.now();
-            updateSimulation();
+            const a2pX = -p2aX;
+            const a2pY = -p2aY;
+            
+            const dotProductHeading = headingX * a2pX + headingY * a2pY;
+            if (dotProductHeading < cosCone) return; 
+        }
+        
+        // Detected! Register crossing
+        panel.crossedAgents.add(agentId);
+        floorDetections[floor].add(agentId);
+    });
+}
+
+// Simulate a single agent from start to exit
+function simulateAgent(agentIndex, activePanelIds) {
+    const agentId = `agent_${agentIndex}`;
+    
+    // Spawn
+    const spawnNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
+    const startNode = spawnNodes[Math.floor(Math.random() * spawnNodes.length)];
+    
+    let currentNodeId = startNode.id;
+    let lastVisitedShopId = null;
+    
+    const visitsCount = minShopVisits + Math.floor(Math.random() * (maxShopVisits - minShopVisits + 1));
+    let totalDistTraveled = 0;
+    
+    // Visits
+    for (let v = 0; v < visitsCount; v++) {
+        const targetShop = selectNextShopGravity(currentNodeId, lastVisitedShopId);
+        if (!targetShop) break;
+        
+        const path = pathCache[currentNodeId][targetShop.id];
+        if (!path || path.length <= 1) {
+            currentNodeId = targetShop.id;
+            lastVisitedShopId = targetShop.id;
+            continue;
+        }
+        
+        const cat = getStoreCategory(targetShop.name);
+        shopCategoryVisits[cat]++;
+        
+        for (let i = 0; i < path.length - 1; i++) {
+            const uId = path[i];
+            const vId = path[i + 1];
+            const n1 = nodesMap[uId];
+            const n2 = nodesMap[vId];
+            
+            const segmentDist = distanceM([n1.x, n1.y], [n2.x, n2.y]);
+            totalDistTraveled += segmentDist;
+            
+            const stepMeters = 1.0;
+            const numSteps = Math.max(1, Math.floor(segmentDist / stepMeters));
+            
+            for (let s = 0; s <= numSteps; s++) {
+                const t = s / numSteps;
+                const x = n1.x + t * (n2.x - n1.x);
+                const y = n1.y + t * (n2.y - n1.y);
+                
+                checkPanelCrossing(x, y, n1.level, n1, n2, agentId, activePanelIds);
+            }
+        }
+        
+        currentNodeId = targetShop.id;
+        lastVisitedShopId = targetShop.id;
+    }
+    
+    // Exit
+    const exitNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
+    const exitNode = exitNodes[Math.floor(Math.random() * exitNodes.length)];
+    
+    const pathExit = pathCache[currentNodeId][exitNode.id];
+    if (pathExit && pathExit.length > 1) {
+        for (let i = 0; i < pathExit.length - 1; i++) {
+            const uId = pathExit[i];
+            const vId = pathExit[i + 1];
+            const n1 = nodesMap[uId];
+            const n2 = nodesMap[vId];
+            
+            const segmentDist = distanceM([n1.x, n1.y], [n2.x, n2.y]);
+            totalDistTraveled += segmentDist;
+            
+            const stepMeters = 1.0;
+            const numSteps = Math.max(1, Math.floor(segmentDist / stepMeters));
+            
+            for (let s = 0; s <= numSteps; s++) {
+                const t = s / numSteps;
+                const x = n1.x + t * (n2.x - n1.x);
+                const y = n1.y + t * (n2.y - n1.y);
+                
+                checkPanelCrossing(x, y, n1.level, n1, n2, agentId, activePanelIds);
+            }
+        }
+    }
+    
+    return {
+        id: agentId,
+        distance: totalDistTraveled,
+        visits: visitsCount
+    };
+}
+
+// Execute the simulation using frame-by-frame batching
+function runSimulation() {
+    readUIParameters();
+    
+    setUIControlsState(true);
+    
+    // Switch Inner Cards visible layout
+    document.getElementById("state-setup-stats").style.display = "none";
+    document.getElementById("state-setup-list").style.display = "none";
+    document.getElementById("state-results-summary").style.display = "none";
+    document.getElementById("state-results-details").style.display = "none";
+    document.getElementById("state-running").style.display = "flex";
+    
+    // Reset stats
+    panels.forEach(p => p.crossedAgents.clear());
+    simulatedAgentsData = [];
+    for (const cat in shopCategoryVisits) {
+        shopCategoryVisits[cat] = 0;
+    }
+    floorDetections["1"].clear();
+    floorDetections["2"].clear();
+    floorDetections["3"].clear();
+    
+    // Build active panels set
+    const activePanelIds = new Set();
+    panels.forEach(p => {
+        const checkbox = document.getElementById(`chk-${p.id}`);
+        if (checkbox && checkbox.checked) {
+            activePanelIds.add(p.id);
         }
     });
     
-    // Reset
-    document.getElementById("btn-reset").addEventListener("click", () => {
-        isRunning = false;
-        btnStart.textContent = "Start Simulation";
-        btnStart.className = "btn btn-primary";
-        document.getElementById("sim-status").textContent = "Paused";
-        document.getElementById("sim-status").style.background = "rgba(245, 158, 11, 0.2)";
-        document.getElementById("sim-status").style.color = "#fbbf24";
+    let currentAgentCount = 0;
+    const batchSize = 1500; 
+    const startTime = performance.now();
+    
+    const circle = document.getElementById("running-progress-circle");
+    const radius = circle.r.baseVal.value;
+    const circumference = radius * 2 * Math.PI;
+    circle.style.strokeDasharray = `${circumference} ${circumference}`;
+    
+    function setProgress(percent) {
+        const offset = circumference - (percent / 100) * circumference;
+        circle.style.strokeDashoffset = offset;
+        document.getElementById("running-progress-percent").textContent = `${Math.round(percent)}%`;
+    }
+    
+    document.getElementById("running-status-text").textContent = "Preparing pedestrian graphs...";
+    setProgress(0);
+    
+    setTimeout(() => {
+        if (Object.keys(distanceMatrix).length === 0) {
+            precomputePaths();
+        }
         
-        // Clean up agents
-        agents.forEach(agent => agent.cleanup());
-        agents = [];
-        totalSpawns = 0;
+        document.getElementById("running-status-text").textContent = "Simulating gravity choices...";
         
-        // Reset panels crossing data
-        panels.forEach(panel => {
-            panel.crossedAgents.clear();
-            const badge = document.querySelector(`#item-${panel.id} .panel-crossing-badge`);
-            if (badge) badge.textContent = "0";
-        });
+        function processBatch() {
+            const startBatchIndex = currentAgentCount;
+            const endBatchIndex = Math.min(totalAgentsToSimulate, startBatchIndex + batchSize);
+            
+            for (let i = startBatchIndex; i < endBatchIndex; i++) {
+                const data = simulateAgent(i + 1, activePanelIds);
+                simulatedAgentsData.push(data);
+            }
+            
+            currentAgentCount = endBatchIndex;
+            const percent = (currentAgentCount / totalAgentsToSimulate) * 100;
+            setProgress(percent);
+            document.getElementById("running-substats").textContent = `Simulated: ${currentAgentCount.toLocaleString()} / ${totalAgentsToSimulate.toLocaleString()}`;
+            
+            if (currentAgentCount < totalAgentsToSimulate) {
+                requestAnimationFrame(processBatch);
+            } else {
+                // Completed!
+                const endTime = performance.now();
+                const elapsedTimeMs = Math.round(endTime - startTime);
+                
+                // Show completed state cards
+                document.getElementById("state-running").style.display = "none";
+                document.getElementById("state-results-summary").style.display = "flex";
+                document.getElementById("state-results-details").style.display = "block";
+                
+                // Populate stats
+                renderResultsMetrics(elapsedTimeMs);
+                renderCharts();
+                renderLeaderboardTable();
+                
+                // Refresh Map Visual overlays with counts in tooltips
+                updatePanelMapVisuals();
+                
+                // Re-enable inputs
+                setUIControlsState(false);
+                document.getElementById("btn-reset").removeAttribute("disabled");
+            }
+        }
         
-        renderPanelCones();
+        requestAnimationFrame(processBatch);
+    }, 100);
+}
+
+// Read parameters from sliders/inputs
+function readUIParameters() {
+    totalAgentsToSimulate = parseInt(document.getElementById("input-total-agents").value);
+    minShopVisits = parseInt(document.getElementById("input-min-visits").value);
+    maxShopVisits = parseInt(document.getElementById("input-max-visits").value);
+    baseWalkSpeedMS = parseFloat(document.getElementById("input-walk-speed").value);
+    decayExponent = parseFloat(document.getElementById("input-decay-exponent").value);
+    maxViewingDistance = parseFloat(document.getElementById("input-view-dist").value);
+    viewingConeAngle = parseFloat(document.getElementById("input-cone-angle").value);
+    
+    // Attractiveness weights
+    categoryWeights.farmers = parseInt(document.getElementById("wt-farmers").value) / 100.0;
+    categoryWeights.davidjones = parseInt(document.getElementById("wt-davidjones").value) / 100.0;
+    categoryWeights.hm = parseInt(document.getElementById("wt-hm").value) / 100.0;
+    categoryWeights.woolworths = parseInt(document.getElementById("wt-woolworths").value) / 100.0;
+    categoryWeights.jbhifi = parseInt(document.getElementById("wt-jbhifi").value) / 100.0;
+    categoryWeights.foodcourt = parseInt(document.getElementById("wt-foodcourt").value) / 100.0;
+    categoryWeights.specialty = parseInt(document.getElementById("wt-specialty").value) / 100.0;
+}
+
+// Enable/Disable side controls
+function setUIControlsState(disabled) {
+    const inputs = document.querySelectorAll(".sidebar input, .sidebar button");
+    inputs.forEach(el => {
+        if (el.id === "btn-reset") return; 
+        if (disabled) {
+            el.setAttribute("disabled", "true");
+        } else {
+            el.removeAttribute("disabled");
+        }
+    });
+}
+
+// Render summary cards in results view
+function renderResultsMetrics(elapsedTimeMs) {
+    document.getElementById("res-total-agents").textContent = totalAgentsToSimulate.toLocaleString();
+    
+    let totalDetections = 0;
+    panels.forEach(p => {
+        const isChecked = document.getElementById(`chk-result-${p.id}`)?.checked ?? document.getElementById(`chk-${p.id}`)?.checked ?? true;
+        if (isChecked) {
+            totalDetections += p.crossedAgents.size;
+        }
+    });
+    document.getElementById("res-total-crossings").textContent = totalDetections.toLocaleString();
+    
+    recalculateCoverage();
+    
+    const speedThroughput = Math.round(totalAgentsToSimulate / (elapsedTimeMs / 1000.0));
+    document.getElementById("res-speed-throughput").textContent = `${speedThroughput.toLocaleString()} agents/s`;
+    document.getElementById("res-elapsed-time").textContent = `${elapsedTimeMs.toLocaleString()}ms`;
+}
+
+// Recalculate unique agents crossed and update coverage text (Results Screen)
+function recalculateCoverage() {
+    const uniqueAgents = new Set();
+    let totalDetections = 0;
+    
+    panels.forEach(p => {
+        const checkbox = document.getElementById(`chk-result-${p.id}`);
+        const isChecked = checkbox ? checkbox.checked : (document.getElementById(`chk-${p.id}`)?.checked ?? true);
         
-        document.getElementById("stat-total-spawns").textContent = "0";
-        document.getElementById("stat-active-agents").textContent = "0";
-        document.getElementById("unique-cross-count").textContent = "0";
+        if (isChecked) {
+            p.crossedAgents.forEach(agentId => {
+                uniqueAgents.add(agentId);
+            });
+            totalDetections += p.crossedAgents.size;
+        }
+        
+        const tr = document.getElementById(`row-${p.id}`);
+        if (tr) {
+            if (isChecked) {
+                tr.classList.remove("inactive-row");
+            } else {
+                tr.classList.add("inactive-row");
+            }
+        }
     });
     
-    // Floor Switching Button selectors
-    const floorBtns = document.querySelectorAll(".floor-btn");
-    floorBtns.forEach(btn => {
+    document.getElementById("unique-cross-count").textContent = uniqueAgents.size.toLocaleString();
+    document.getElementById("res-total-crossings").textContent = totalDetections.toLocaleString();
+    
+    const coveragePercent = ((uniqueAgents.size / totalAgentsToSimulate) * 100).toFixed(2);
+    document.getElementById("coverage-rate").textContent = `${coveragePercent}%`;
+}
+
+// Draw Chart.js diagrams
+function renderCharts() {
+    if (typeof Chart === 'undefined') {
+        const containers = document.querySelectorAll(".chart-container");
+        containers.forEach(container => {
+            if (!container.querySelector(".offline-chart-notice")) {
+                container.innerHTML = `
+                    <div class="offline-chart-notice" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: #64748b; font-size: 11px; text-align: center; border: 1px dashed rgba(255,255,255,0.05); border-radius: 6px;">
+                        <span>📊</span>
+                        <p style="margin-top: 4px;">Charts offline (Chart.js CDN blocked)</p>
+                    </div>
+                `;
+            }
+        });
+        return;
+    }
+    
+    if (storeVisitsChart) storeVisitsChart.destroy();
+    if (floorCrossingsChart) floorCrossingsChart.destroy();
+    
+    // Store category Chart
+    const ctxStore = document.getElementById("chart-store-visits").getContext("2d");
+    const categoryLabels = {
+        farmers: "Farmers",
+        davidjones: "David Jones",
+        hm: "H&M",
+        woolworths: "Woolworths",
+        jbhifi: "JB Hi-Fi",
+        foodcourt: "Food Court",
+        specialty: "Specialty"
+    };
+    
+    const labels = Object.keys(shopCategoryVisits).map(k => categoryLabels[k] || k);
+    const dataVisits = Object.values(shopCategoryVisits);
+    
+    storeVisitsChart = new Chart(ctxStore, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Visits',
+                data: dataVisits,
+                backgroundColor: [
+                    'rgba(6, 182, 212, 0.45)', // Farmers
+                    'rgba(139, 92, 246, 0.45)', // David Jones
+                    'rgba(236, 72, 153, 0.45)', // H&M
+                    'rgba(16, 185, 129, 0.45)', // Woolworths
+                    'rgba(245, 158, 11, 0.45)', // JB Hi-Fi
+                    'rgba(239, 68, 68, 0.45)',  // Food Court
+                    'rgba(148, 163, 184, 0.45)' // Specialty
+                ],
+                borderColor: [
+                    '#06b6d4',
+                    '#8b5cf6',
+                    '#ec4899',
+                    '#10b981',
+                    '#f59e0b',
+                    '#ef4444',
+                    '#94a3b8'
+                ],
+                borderWidth: 1.5,
+                borderRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#0c111d',
+                    titleColor: '#ffffff',
+                    bodyColor: '#cbd5e1',
+                    borderColor: 'rgba(255,255,255,0.08)',
+                    borderWidth: 1,
+                    padding: 8,
+                    bodyFont: { family: 'Inter', size: 11 }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: '#64748b', font: { family: 'Inter', size: 10 } }
+                },
+                y: {
+                    grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                    ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 9 } }
+                }
+            }
+        }
+    });
+    
+    // Floor Doughnut chart
+    const ctxFloor = document.getElementById("chart-floor-crossings").getContext("2d");
+    const floorUniqueCounts = { "1": 0, "2": 0, "3": 0 };
+    ["1", "2", "3"].forEach(f => {
+        const floorAgents = new Set();
+        panels.forEach(p => {
+            if (p.floor === f) {
+                const isChecked = document.getElementById(`chk-result-${p.id}`)?.checked ?? document.getElementById(`chk-${p.id}`)?.checked ?? true;
+                if (isChecked) {
+                    p.crossedAgents.forEach(aId => floorAgents.add(aId));
+                }
+            }
+        });
+        floorUniqueCounts[f] = floorAgents.size;
+    });
+    
+    const floorLabels = ["Level 1", "Level 2", "Level 3"];
+    const dataFloors = [floorUniqueCounts["1"], floorUniqueCounts["2"], floorUniqueCounts["3"]];
+    
+    floorCrossingsChart = new Chart(ctxFloor, {
+        type: 'doughnut',
+        data: {
+            labels: floorLabels,
+            datasets: [{
+                data: dataFloors,
+                backgroundColor: [
+                    'rgba(59, 130, 246, 0.45)', // L1
+                    'rgba(16, 185, 129, 0.45)', // L2
+                    'rgba(245, 158, 11, 0.45)'  // L3
+                ],
+                borderColor: [
+                    '#3b82f6',
+                    '#10b981',
+                    '#f59e0b'
+                ],
+                borderWidth: 1.5,
+                hoverOffset: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        color: '#94a3b8',
+                        font: { family: 'Inter', size: 10 },
+                        padding: 10
+                    }
+                },
+                tooltip: {
+                    backgroundColor: '#0c111d',
+                    titleColor: '#ffffff',
+                    bodyColor: '#cbd5e1',
+                    borderColor: 'rgba(255,255,255,0.08)',
+                    borderWidth: 1,
+                    padding: 8,
+                    bodyFont: { family: 'Inter', size: 11 }
+                }
+            },
+            cutout: '60%'
+        }
+    });
+}
+
+// Render Panel selection checklist in Setup view
+function renderPanelsSelectionGrid() {
+    const grid = document.getElementById("panels-selection-grid");
+    grid.innerHTML = "";
+    
+    const filteredPanels = panels.filter(panel => {
+        return panel.id.toLowerCase().includes(currentSearchQuery.toLowerCase()) || 
+               panel.orientation.toString().includes(currentSearchQuery);
+    });
+    
+    if (filteredPanels.length === 0) {
+        grid.innerHTML = `<div class="loading-placeholder"><p>No panels match search.</p></div>`;
+        return;
+    }
+    
+    filteredPanels.forEach(panel => {
+        const card = document.createElement("label");
+        card.className = "panel-card-select";
+        card.setAttribute("for", `chk-${panel.id}`);
+        
+        let flClass = "fl-1";
+        if (panel.floor === "2") flClass = "fl-2";
+        if (panel.floor === "3") flClass = "fl-3";
+        
+        card.innerHTML = `
+            <input type="checkbox" id="chk-${panel.id}" checked />
+            <div class="panel-card-info">
+                <div class="panel-card-id">${panel.name}</div>
+                <div class="panel-card-meta">
+                    <span class="panel-card-floor-badge ${flClass}">L${panel.floor}</span> 
+                    Orient: ${panel.orientation}°
+                </div>
+            </div>
+        `;
+        
+        card.querySelector("input").addEventListener("change", () => {
+            updateSelectedPanelsHeaderCount();
+            updatePanelMapVisuals();
+        });
+        grid.appendChild(card);
+    });
+    
+    updateSelectedPanelsHeaderCount();
+}
+
+// Update selected count indicator in setup card header
+function updateSelectedPanelsHeaderCount() {
+    let selected = 0;
+    panels.forEach(p => {
+        const chk = document.getElementById(`chk-${p.id}`);
+        if (chk && chk.checked) selected++;
+    });
+    
+    document.getElementById("panels-selected-count").textContent = selected;
+    document.getElementById("panels-total-count").textContent = panels.length;
+}
+
+// Render sorted leaderboard table in Results view
+function renderLeaderboardTable() {
+    const tbody = document.getElementById("leaderboard-tbody");
+    tbody.innerHTML = "";
+    
+    const searchVal = document.getElementById("leaderboard-search").value.toLowerCase();
+    
+    const sortedPanels = [...panels]
+        .filter(p => p.id.toLowerCase().includes(searchVal) || p.floor.includes(searchVal))
+        .sort((a, b) => b.crossedAgents.size - a.crossedAgents.size);
+    
+    if (sortedPanels.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:#64748b; padding:2rem;">No matching leaderboard rows.</td></tr>`;
+        return;
+    }
+    
+    sortedPanels.forEach((panel, index) => {
+        const isChecked = document.getElementById(`chk-${panel.id}`)?.checked ?? true;
+        const count = panel.crossedAgents.size;
+        const percent = ((count / totalAgentsToSimulate) * 100).toFixed(2);
+        
+        let rankBadgeClass = "rank-badge";
+        if (index === 0) rankBadgeClass += " top-1";
+        else if (index === 1) rankBadgeClass += " top-2";
+        else if (index === 2) rankBadgeClass += " top-3";
+        
+        const tr = document.createElement("tr");
+        tr.id = `row-${panel.id}`;
+        if (!isChecked) tr.className = "inactive-row";
+        
+        tr.innerHTML = `
+            <td><div class="${rankBadgeClass}">${index + 1}</div></td>
+            <td class="td-id">${panel.name}</td>
+            <td>L${panel.floor}</td>
+            <td>${panel.orientation}°</td>
+            <td style="font-family: var(--font-mono); font-size:10px; color:#64748b;">
+                ${panel.lat.toFixed(5)}, ${panel.lon.toFixed(5)}
+            </td>
+            <td class="td-checkbox-center">
+                <input type="checkbox" id="chk-result-${panel.id}" ${isChecked ? 'checked' : ''} />
+            </td>
+            <td style="text-align: right; font-weight:700; font-family: var(--font-mono);" class="neon-cyan">
+                ${count.toLocaleString()}
+            </td>
+            <td>
+                <div class="exposure-bar-container">
+                    <span class="exposure-percent-val">${percent}%</span>
+                    <div class="exposure-bar-bg">
+                        <div class="exposure-bar-fill" style="width: ${percent}%;"></div>
+                    </div>
+                </div>
+            </td>
+        `;
+        
+        const checkbox = tr.querySelector(`#chk-result-${panel.id}`);
+        checkbox.addEventListener("change", () => {
+            // Sync setup checkbox
+            const setupChk = document.getElementById(`chk-${panel.id}`);
+            if (setupChk) setupChk.checked = checkbox.checked;
+            
+            recalculateCoverage();
+            renderCharts();
+            updatePanelMapVisuals();
+            updateSelectedPanelsHeaderCount();
+        });
+        
+        tbody.appendChild(tr);
+    });
+}
+
+// Bind UI controls and events
+function bindUIControls() {
+    // Sliders & inputs
+    const sAgents = document.getElementById("input-total-agents");
+    sAgents.addEventListener("input", () => {
+        document.getElementById("val-total-agents").textContent = parseInt(sAgents.value).toLocaleString();
+    });
+    
+    const sMin = document.getElementById("input-min-visits");
+    sMin.addEventListener("input", () => {
+        const val = parseInt(sMin.value);
+        document.getElementById("val-min-visits").textContent = val;
+        const sMax = document.getElementById("input-max-visits");
+        if (parseInt(sMax.value) < val) {
+            sMax.value = val;
+            document.getElementById("val-max-visits").textContent = val;
+        }
+    });
+    
+    const sMax = document.getElementById("input-max-visits");
+    sMax.addEventListener("input", () => {
+        const val = parseInt(sMax.value);
+        document.getElementById("val-max-visits").textContent = val;
+        const sMin = document.getElementById("input-min-visits");
+        if (parseInt(sMin.value) > val) {
+            sMin.value = val;
+            document.getElementById("val-min-visits").textContent = val;
+        }
+    });
+    
+    const sSpeed = document.getElementById("input-walk-speed");
+    sSpeed.addEventListener("input", () => {
+        document.getElementById("val-walk-speed").textContent = `${parseFloat(sSpeed.value).toFixed(1)} m/s`;
+    });
+    
+    const sDecay = document.getElementById("input-decay-exponent");
+    sDecay.addEventListener("input", () => {
+        document.getElementById("val-decay-exponent").textContent = parseFloat(sDecay.value).toFixed(1);
+    });
+    
+    const sViewDist = document.getElementById("input-view-dist");
+    sViewDist.addEventListener("input", () => {
+        document.getElementById("val-view-dist").textContent = `${parseFloat(sViewDist.value)}m`;
+        renderPanelCones();
+    });
+    
+    const sConeAngle = document.getElementById("input-cone-angle");
+    sConeAngle.addEventListener("input", () => {
+        document.getElementById("val-cone-angle").textContent = `${parseFloat(sConeAngle.value)}°`;
+        renderPanelCones();
+    });
+    
+    // Graph switch
+    const chkGraph = document.getElementById("chk-show-graph");
+    chkGraph.addEventListener("change", () => {
+        showGraph = chkGraph.checked;
+        renderGraphOverlay();
+    });
+    
+    // Shop Weights attractiveness sync
+    const wtSliders = [
+        { id: "wt-farmers", labelId: "val-wt-farmers" },
+        { id: "wt-davidjones", labelId: "val-wt-davidjones" },
+        { id: "wt-hm", labelId: "val-wt-hm" },
+        { id: "wt-woolworths", labelId: "val-wt-woolworths" },
+        { id: "wt-jbhifi", labelId: "val-wt-jbhifi" },
+        { id: "wt-foodcourt", labelId: "val-wt-foodcourt" },
+        { id: "wt-specialty", labelId: "val-wt-specialty" }
+    ];
+    wtSliders.forEach(slider => {
+        const el = document.getElementById(slider.id);
+        el.addEventListener("input", () => {
+            document.getElementById(slider.labelId).textContent = `${el.value}%`;
+        });
+    });
+    
+    // Panel Search
+    const panelSearch = document.getElementById("panel-search");
+    panelSearch.addEventListener("input", () => {
+        currentSearchQuery = panelSearch.value;
+        renderPanelsSelectionGrid();
+    });
+    
+    // Bulk actions
+    document.getElementById("btn-select-all").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-${p.id}`);
+            if (chk) chk.checked = true;
+        });
+        updateSelectedPanelsHeaderCount();
+        updatePanelMapVisuals();
+    });
+    
+    document.getElementById("btn-select-none").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-${p.id}`);
+            if (chk) chk.checked = false;
+        });
+        updateSelectedPanelsHeaderCount();
+        updatePanelMapVisuals();
+    });
+    
+    // Floor-specific selectors
+    document.getElementById("btn-select-fl1").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-${p.id}`);
+            if (chk) chk.checked = (p.floor === "1");
+        });
+        updateSelectedPanelsHeaderCount();
+        updatePanelMapVisuals();
+    });
+    document.getElementById("btn-select-fl2").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-${p.id}`);
+            if (chk) chk.checked = (p.floor === "2");
+        });
+        updateSelectedPanelsHeaderCount();
+        updatePanelMapVisuals();
+    });
+    document.getElementById("btn-select-fl3").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-${p.id}`);
+            if (chk) chk.checked = (p.floor === "3");
+        });
+        updateSelectedPanelsHeaderCount();
+        updatePanelMapVisuals();
+    });
+    
+    // Map Floor Overlay Selector Buttons
+    const mapFloorBtns = document.querySelectorAll(".floor-btn");
+    mapFloorBtns.forEach(btn => {
         btn.addEventListener("click", () => {
-            floorBtns.forEach(b => b.classList.remove("active"));
+            mapFloorBtns.forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
             
             const prevFloor = activeFloor;
             activeFloor = btn.getAttribute("data-floor");
             
-            // Toggle Leaflet geojson overlays
+            // Toggle layer
             if (floorLayers[prevFloor]) map.removeLayer(floorLayers[prevFloor]);
             if (floorLayers[activeFloor]) map.addLayer(floorLayers[activeFloor]);
             
-            // Re-render graph overlay links matching the floor level
             renderGraphOverlay();
-            
-            // Update panel marker display
-            updatePanelMarkersVisibility();
-            
-            // Re-render visibility wedges
+            renderPanelMarkers();
             renderPanelCones();
         });
     });
     
-    // Configuration Sliders
+    // Run button
+    document.getElementById("btn-run").addEventListener("click", runSimulation);
     
-    // Simulation speed
-    const simSpeedSlider = document.getElementById("input-sim-speed");
-    simSpeedSlider.addEventListener("input", () => {
-        simSpeedMultiplier = parseInt(simSpeedSlider.value);
-        document.getElementById("val-sim-speed").textContent = `${simSpeedMultiplier}x`;
+    // Reset button
+    document.getElementById("btn-reset").addEventListener("click", () => {
+        // Toggle card visual elements back
+        document.getElementById("state-results-summary").style.display = "none";
+        document.getElementById("state-results-details").style.display = "none";
+        document.getElementById("state-setup-stats").style.display = "flex";
+        document.getElementById("state-setup-list").style.display = "block";
+        
+        document.getElementById("btn-reset").setAttribute("disabled", "true");
+        
+        // Clear counts
+        panels.forEach(p => p.crossedAgents.clear());
+        
+        // Reset Visuals
+        renderPanelsSelectionGrid();
+        updatePanelMapVisuals();
     });
     
-    // Max Agents
-    const maxAgentsSlider = document.getElementById("input-max-agents");
-    maxAgentsSlider.addEventListener("input", () => {
-        maxActiveAgents = parseInt(maxAgentsSlider.value);
-        document.getElementById("val-max-agents").textContent = maxActiveAgents;
-    });
+    // Leaderboard search
+    const leadSearch = document.getElementById("leaderboard-search");
+    leadSearch.addEventListener("input", renderLeaderboardTable);
     
-    // Spawn Rate
-    const spawnRateSlider = document.getElementById("input-spawn-rate");
-    spawnRateSlider.addEventListener("input", () => {
-        spawnRatePerMin = parseInt(spawnRateSlider.value);
-        document.getElementById("val-spawn-rate").textContent = spawnRatePerMin;
-    });
-    
-    // Walking Speed
-    const walkSpeedSlider = document.getElementById("input-walk-speed");
-    walkSpeedSlider.addEventListener("input", () => {
-        baseWalkSpeedMS = parseFloat(walkSpeedSlider.value);
-        document.getElementById("val-walk-speed").textContent = `${baseWalkSpeedMS.toFixed(1)} m/s`;
-    });
-    
-    // Toggle Walk paths line render
-    const chkPaths = document.getElementById("chk-show-paths");
-    chkPaths.addEventListener("change", () => {
-        showPaths = chkPaths.checked;
-    });
-    
-    // Toggle Viewing cones overlay render
-    const chkCones = document.getElementById("chk-show-cones");
-    chkCones.addEventListener("change", () => {
-        showCones = chkCones.checked;
-        if (showCones) {
-            map.addLayer(coneLayer);
-            renderPanelCones();
-        } else {
-            map.removeLayer(coneLayer);
-        }
-    });
-    
-    // Max Viewing Distance slider
-    const viewDistSlider = document.getElementById("input-view-dist");
-    viewDistSlider.addEventListener("input", () => {
-        maxViewingDistance = parseFloat(viewDistSlider.value);
-        document.getElementById("val-view-dist").textContent = maxViewingDistance;
-        renderPanelCones();
-    });
-
-    // Viewing Cone Angle slider
-    const coneAngleSlider = document.getElementById("input-cone-angle");
-    coneAngleSlider.addEventListener("input", () => {
-        viewingConeAngle = parseFloat(coneAngleSlider.value);
-        document.getElementById("val-cone-angle").textContent = `${viewingConeAngle}°`;
-        renderPanelCones();
-    });
-    
-    // Toggle Graph overlay links
-    const chkGraph = document.getElementById("chk-show-graph");
-    chkGraph.addEventListener("change", () => {
-        showGraph = chkGraph.checked;
-        if (showGraph) {
-            map.addLayer(graphLayer);
-        } else {
-            map.removeLayer(graphLayer);
-        }
-    });
-    
-    // Attractiveness destination Weights sliders
-    const wtSliders = [
-        { id: "wt-farmers", cat: "farmers", labelId: "val-wt-farmers" },
-        { id: "wt-davidjones", cat: "davidjones", labelId: "val-wt-davidjones" },
-        { id: "wt-hm", cat: "hm", labelId: "val-wt-hm" },
-        { id: "wt-woolworths", cat: "woolworths", labelId: "val-wt-woolworths" },
-        { id: "wt-jbhifi", cat: "jbhifi", labelId: "val-wt-jbhifi" },
-        { id: "wt-foodcourt", cat: "foodcourt", labelId: "val-wt-foodcourt" },
-        { id: "wt-specialty", cat: "specialty", labelId: "val-wt-specialty" }
-    ];
-    
-    wtSliders.forEach(slider => {
-        const el = document.getElementById(slider.id);
-        el.addEventListener("input", () => {
-            const val = parseInt(el.value);
-            categoryWeights[slider.cat] = val / 100.0;
-            document.getElementById(slider.labelId).textContent = `${val}%`;
+    // Leaderboard bulk actions
+    document.getElementById("btn-leaderboard-select-all").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-result-${p.id}`);
+            if (chk) chk.checked = true;
+            const setupChk = document.getElementById(`chk-${p.id}`);
+            if (setupChk) setupChk.checked = true;
         });
+        recalculateCoverage();
+        renderCharts();
+        updatePanelMapVisuals();
+        updateSelectedPanelsHeaderCount();
+    });
+    
+    document.getElementById("btn-leaderboard-select-none").addEventListener("click", () => {
+        panels.forEach(p => {
+            const chk = document.getElementById(`chk-result-${p.id}`);
+            if (chk) chk.checked = false;
+            const setupChk = document.getElementById(`chk-${p.id}`);
+            if (setupChk) setupChk.checked = false;
+        });
+        recalculateCoverage();
+        renderCharts();
+        updatePanelMapVisuals();
+        updateSelectedPanelsHeaderCount();
     });
 }
 
-// App Initialization Entry Point
+// Initial App Entry Point
 window.addEventListener("DOMContentLoaded", () => {
-    initMap();
-    loadGeoJSON();
-    loadGraph();
-    loadPanels().then(() => {
-        bindUIEvents();
+    // 1. Initialize Map Container & Layout controls if Leaflet is present
+    const isLeafletLoaded = (typeof L !== 'undefined');
+    if (isLeafletLoaded) {
+        initMap();
+    } else {
+        const mapContainer = document.getElementById("map");
+        if (mapContainer) {
+            mapContainer.innerHTML = `
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 2rem; text-align: center; color: #94a3b8; gap: 12px;">
+                    <span style="font-size: 32px;">⚠️</span>
+                    <h3 style="color: #ffffff; font-family: var(--font-heading); font-size: 16px;">Map Visualizer Offline</h3>
+                    <p style="font-size: 12px; max-width: 300px; line-height: 1.4;">The Leaflet mapping engine failed to load. The headless mathematical simulation remains fully operational.</p>
+                </div>
+            `;
+        }
+    }
+    
+    bindUIControls();
+    
+    // 2. Load panel list CSV and network graph asynchronously
+    const promises = [loadPanels(), loadGraph()];
+    if (isLeafletLoaded) {
+        promises.push(loadGeoJSON());
+    }
+    
+    Promise.all(promises).then(() => {
+        console.log("Initialization Complete. Headless Engine Ready.");
+        renderPanelsSelectionGrid();
+        
+        // Start precomputation in background so that there's no lag when running
+        setTimeout(precomputePaths, 200);
+    }).catch(err => {
+        console.error("CRITICAL PORTAL INITIALIZATION FAILURE:", err);
+        // Display user-friendly error on screen if critical data fails to load
+        const listContainer = document.getElementById("panels-selection-grid");
+        if (listContainer) {
+            listContainer.innerHTML = `
+                <div style="padding: 1.5rem; text-align: center; color: #ef4444; border: 1px dashed rgba(239, 68, 68, 0.2); border-radius: 8px;">
+                    <p style="font-weight: 600;">System Failed to Initialize</p>
+                    <p style="font-size: 11px; margin-top: 4px; color: #94a3b8;">${err.message || err}</p>
+                </div>
+            `;
+        }
     });
 });
