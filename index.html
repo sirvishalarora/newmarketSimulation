@@ -83,6 +83,24 @@
                         </div>
                         <input type="range" id="input-walk-speed" min="0.5" max="3.0" value="1.3" step="0.1" />
                     </div>
+
+                    <!-- Max Viewing Distance -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Max Viewing Dist (m)
+                            <span class="control-val" id="val-view-dist">15</span>
+                        </div>
+                        <input type="range" id="input-view-dist" min="5" max="30" value="15" step="1" />
+                    </div>
+
+                    <!-- Viewing Cone Angle -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            Viewing Cone Angle (°)
+                            <span class="control-val" id="val-cone-angle">60°</span>
+                        </div>
+                        <input type="range" id="input-cone-angle" min="15" max="90" value="60" step="5" />
+                    </div>
                 </div>
 
                 <!-- Visualization Toggles -->
@@ -92,6 +110,13 @@
                         <div class="toggle-label">Render Walk Paths</div>
                         <label class="switch">
                             <input type="checkbox" id="chk-show-paths" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <div class="toggle-label">Render Viewing Cones</div>
+                        <label class="switch">
+                            <input type="checkbox" id="chk-show-cones" checked>
                             <span class="slider"></span>
                         </label>
                     </div>

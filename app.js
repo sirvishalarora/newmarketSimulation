@@ -50,6 +50,7 @@ function loadPanels() {
             console.log(`Loaded ${panels.length} panels from CSV.`);
             renderPanelListUI();
             renderPanelMarkers();
+            renderPanelCones();
         })
         .catch(err => {
             console.error("Error loading CSV panels:", err);
@@ -94,6 +95,12 @@ let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.feature
 let graphLayer = L.layerGroup();
 let agentLayer = L.layerGroup();
 let panelLayer = L.layerGroup();
+let coneLayer = L.layerGroup();
+
+// Viewing Corridor config
+let maxViewingDistance = 15.0; // meters
+let viewingConeAngle = 60.0; // degrees
+let showCones = true;
 
 // Priority Queue for Dijkstra
 class PriorityQueue {
@@ -188,6 +195,7 @@ function initMap() {
     floorLayers["1"].addTo(map);
     agentLayer.addTo(map);
     panelLayer.addTo(map);
+    coneLayer.addTo(map);
 }
 
 // Load and Render Westfield Newmarket GeoJSON layouts
@@ -656,15 +664,52 @@ class Agent {
             const chk = document.getElementById(`chk-${panel.id}`);
             if (!chk || !chk.checked) return;
             
-            // Distance threshold: 8.0 meters
-            const dist = distanceM([this.x, this.y], [panel.lon, panel.lat]);
-            if (dist < 8.0) {
-                if (!panel.crossedAgents.has(this.id)) {
-                    panel.crossedAgents.add(this.id);
-                    
-                    // Trigger visual flash
-                    triggerPanelCrossingFeedback(panel.id);
-                }
+            // 1. Distance check using global maxViewingDistance parameter
+            const dx = (this.x - panel.lon) * LON_DEG_TO_M;
+            const dy = (this.y - panel.lat) * LAT_DEG_TO_M;
+            const dist = Math.hypot(dx, dy);
+            
+            if (dist > maxViewingDistance) return; // Outside viewing corridor range
+            
+            // 2. Position angle check (Agent must be in front of the panel)
+            // Convert panel orientation (compass degrees) to radian angle
+            const thetaRad = (parseFloat(panel.orientation) * Math.PI) / 180.0;
+            const panelNormalX = Math.sin(thetaRad);
+            const panelNormalY = Math.cos(thetaRad);
+            
+            // Normalized vector from panel to agent
+            const p2aX = dx / dist;
+            const p2aY = dy / dist;
+            
+            const dotProductPosition = p2aX * panelNormalX + p2aY * panelNormalY;
+            const cosCone = Math.cos((viewingConeAngle * Math.PI) / 180.0);
+            
+            if (dotProductPosition < cosCone) return; // Agent is behind or outside the panel's FOV cone
+            
+            // 3. Heading check (Agent must be walking towards the panel)
+            // Agent velocity vector
+            const hx = (this.nextNodePos[0] - this.prevNodePos[0]) * LON_DEG_TO_M;
+            const hy = (this.nextNodePos[1] - this.prevNodePos[1]) * LAT_DEG_TO_M;
+            const headingDist = Math.hypot(hx, hy);
+            
+            if (headingDist > 0.0001) { // Ensure agent is actually moving
+                const headingX = hx / headingDist;
+                const headingY = hy / headingDist;
+                
+                // Vector from agent to panel (normalized)
+                const a2pX = -p2aX;
+                const a2pY = -p2aY;
+                
+                const dotProductHeading = headingX * a2pX + headingY * a2pY;
+                if (dotProductHeading < cosCone) return; // Agent is walking away or past
+            }
+            
+            // Register interaction only if it is the first detection
+            if (!panel.crossedAgents.has(this.id)) {
+                panel.crossedAgents.add(this.id);
+                
+                // Trigger visual flash feedback
+                triggerPanelCrossingFeedback(panel.id);
             }
         });
     }
@@ -753,6 +798,7 @@ function renderPanelListUI() {
         item.querySelector("input").addEventListener("change", () => {
             updateCrossingSummary();
             updatePanelMarkersVisibility();
+            renderPanelCones();
         });
         
         container.appendChild(item);
@@ -804,6 +850,50 @@ function updatePanelMarkersVisibility() {
                 panelLayer.removeLayer(panel.marker);
             }
         }
+    });
+}
+
+// Draw the visual viewing corridor wedges (L.polygon sectors) on the Leaflet map
+function renderPanelCones() {
+    coneLayer.clearLayers();
+    if (!showCones) return;
+    
+    panels.forEach(panel => {
+        if (panel.floor !== activeFloor) return;
+        
+        const chk = document.getElementById(`chk-${panel.id}`);
+        if (chk && !chk.checked) return;
+        
+        const centerLat = panel.lat;
+        const centerLon = panel.lon;
+        const orient = parseFloat(panel.orientation);
+        
+        // Generate wedge vertices starting with center point
+        const points = [[centerLat, centerLon]];
+        
+        const startAngle = orient - viewingConeAngle;
+        const endAngle = orient + viewingConeAngle;
+        
+        // Sample every 5 degrees for a smooth arc
+        for (let a = startAngle; a <= endAngle; a += 5) {
+            const aRad = (a * Math.PI) / 180.0;
+            const latOffset = (maxViewingDistance * Math.cos(aRad)) / LAT_DEG_TO_M;
+            const lonOffset = (maxViewingDistance * Math.sin(aRad)) / LON_DEG_TO_M;
+            points.push([centerLat + latOffset, centerLon + lonOffset]);
+        }
+        
+        // Close the wedge polygon
+        points.push([centerLat, centerLon]);
+        
+        const wedge = L.polygon(points, {
+            color: 'rgba(236, 72, 153, 0.35)',
+            weight: 1,
+            fillColor: '#ec4899',
+            fillOpacity: 0.08,
+            interactive: false
+        });
+        
+        coneLayer.addLayer(wedge);
     });
 }
 
@@ -900,6 +990,8 @@ function bindUIEvents() {
             if (badge) badge.textContent = "0";
         });
         
+        renderPanelCones();
+        
         document.getElementById("stat-total-spawns").textContent = "0";
         document.getElementById("stat-active-agents").textContent = "0";
         document.getElementById("unique-cross-count").textContent = "0";
@@ -924,6 +1016,9 @@ function bindUIEvents() {
             
             // Update panel marker display
             updatePanelMarkersVisibility();
+            
+            // Re-render visibility wedges
+            renderPanelCones();
         });
     });
     
@@ -961,6 +1056,34 @@ function bindUIEvents() {
     const chkPaths = document.getElementById("chk-show-paths");
     chkPaths.addEventListener("change", () => {
         showPaths = chkPaths.checked;
+    });
+    
+    // Toggle Viewing cones overlay render
+    const chkCones = document.getElementById("chk-show-cones");
+    chkCones.addEventListener("change", () => {
+        showCones = chkCones.checked;
+        if (showCones) {
+            map.addLayer(coneLayer);
+            renderPanelCones();
+        } else {
+            map.removeLayer(coneLayer);
+        }
+    });
+    
+    // Max Viewing Distance slider
+    const viewDistSlider = document.getElementById("input-view-dist");
+    viewDistSlider.addEventListener("input", () => {
+        maxViewingDistance = parseFloat(viewDistSlider.value);
+        document.getElementById("val-view-dist").textContent = maxViewingDistance;
+        renderPanelCones();
+    });
+
+    // Viewing Cone Angle slider
+    const coneAngleSlider = document.getElementById("input-cone-angle");
+    coneAngleSlider.addEventListener("input", () => {
+        viewingConeAngle = parseFloat(coneAngleSlider.value);
+        document.getElementById("val-cone-angle").textContent = `${viewingConeAngle}°`;
+        renderPanelCones();
     });
     
     // Toggle Graph overlay links
