@@ -38,6 +38,9 @@ let categoryWeights = {
     woolworths: 0.8,
     jbhifi: 0.85,
     foodcourt: 0.95,
+    noelleeming: 0.4,
+    archiebrothers: 0.35,
+    rebelsport: 0.4,
     specialty: 0.3
 };
 
@@ -50,6 +53,9 @@ let shopCategoryVisits = {
     woolworths: 0,
     jbhifi: 0,
     foodcourt: 0,
+    noelleeming: 0,
+    archiebrothers: 0,
+    rebelsport: 0,
     specialty: 0
 };
 let floorDetections = {
@@ -508,6 +514,9 @@ function getStoreCategory(name) {
     if (nameLower.includes("woolworths") || nameLower.includes("countdown")) return "woolworths";
     if (nameLower.includes("jbhifi") || nameLower.includes("jb hifi") || nameLower.includes("jb hi-fi") || nameLower.includes("jb_hifi")) return "jbhifi";
     if (nameLower.includes("food_court") || nameLower.includes("foodcourt")) return "foodcourt";
+    if (nameLower.includes("noelleeming") || nameLower.includes("noel leeming") || nameLower.includes("noel_leeming")) return "noelleeming";
+    if (nameLower.includes("archiebrothers") || nameLower.includes("archie brothers") || nameLower.includes("archie_brothers")) return "archiebrothers";
+    if (nameLower.includes("rebelsport") || nameLower.includes("rebel sport") || nameLower.includes("rebel_sport")) return "rebelsport";
     
     return "specialty";
 }
@@ -808,6 +817,9 @@ function readUIParameters() {
     categoryWeights.woolworths = parseInt(document.getElementById("wt-woolworths").value) / 100.0;
     categoryWeights.jbhifi = parseInt(document.getElementById("wt-jbhifi").value) / 100.0;
     categoryWeights.foodcourt = parseInt(document.getElementById("wt-foodcourt").value) / 100.0;
+    categoryWeights.noelleeming = parseInt(document.getElementById("wt-noelleeming").value) / 100.0;
+    categoryWeights.archiebrothers = parseInt(document.getElementById("wt-archiebrothers").value) / 100.0;
+    categoryWeights.rebelsport = parseInt(document.getElementById("wt-rebelsport").value) / 100.0;
     categoryWeights.specialty = parseInt(document.getElementById("wt-specialty").value) / 100.0;
 }
 
@@ -906,6 +918,9 @@ function renderCharts() {
         woolworths: "Woolworths",
         jbhifi: "JB Hi-Fi",
         foodcourt: "Food Court",
+        noelleeming: "Noel Leeming",
+        archiebrothers: "Archie Brothers",
+        rebelsport: "Rebel Sport",
         specialty: "Specialty"
     };
     
@@ -926,6 +941,9 @@ function renderCharts() {
                     'rgba(16, 185, 129, 0.45)', // Woolworths
                     'rgba(245, 158, 11, 0.45)', // JB Hi-Fi
                     'rgba(239, 68, 68, 0.45)',  // Food Court
+                    'rgba(14, 165, 233, 0.45)', // Noel Leeming
+                    'rgba(244, 63, 94, 0.45)',  // Archie Brothers
+                    'rgba(132, 204, 22, 0.45)', // Rebel Sport
                     'rgba(148, 163, 184, 0.45)' // Specialty
                 ],
                 borderColor: [
@@ -935,6 +953,9 @@ function renderCharts() {
                     '#10b981',
                     '#f59e0b',
                     '#ef4444',
+                    '#0ea5e9',
+                    '#f43f5e',
+                    '#84cc16',
                     '#94a3b8'
                 ],
                 borderWidth: 1.5,
@@ -1162,6 +1183,59 @@ function renderLeaderboardTable() {
     });
 }
 
+// Export Panel scores and metrics to CSV
+function exportPanelScoresToCSV() {
+    if (!panels || panels.length === 0) return;
+    
+    const sortedPanels = [...panels].sort((a, b) => b.crossedAgents.size - a.crossedAgents.size);
+    
+    const headers = [
+        "Rank",
+        "Panel ID",
+        "Floor",
+        "Orientation",
+        "Latitude",
+        "Longitude",
+        "Active",
+        "Unique Crossed",
+        "Exposure Efficiency (%)"
+    ];
+    
+    const rows = sortedPanels.map((panel, index) => {
+        const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? true;
+        const count = panel.crossedAgents.size;
+        const percent = ((count / totalAgentsToSimulate) * 100).toFixed(2);
+        
+        return [
+            index + 1,
+            `"${panel.name}"`,
+            `"L${panel.floor}"`,
+            `${panel.orientation}`,
+            `${panel.lat}`,
+            `${panel.lon}`,
+            `"${isChecked ? 'Yes' : 'No'}"`,
+            `${count}`,
+            `${percent}`
+        ];
+    });
+    
+    const csvContent = [headers.join(",")].concat(rows.map(row => row.join(","))).join("\n");
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
+    link.setAttribute("download", `westfield_newmarket_panel_scores_${dateStr}_${timeStr}.csv`);
+    
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
 // Bind UI controls and events
 function bindUIControls() {
     // Sliders & inputs
@@ -1229,6 +1303,9 @@ function bindUIControls() {
         { id: "wt-woolworths", labelId: "val-wt-woolworths" },
         { id: "wt-jbhifi", labelId: "val-wt-jbhifi" },
         { id: "wt-foodcourt", labelId: "val-wt-foodcourt" },
+        { id: "wt-noelleeming", labelId: "val-wt-noelleeming" },
+        { id: "wt-archiebrothers", labelId: "val-wt-archiebrothers" },
+        { id: "wt-rebelsport", labelId: "val-wt-rebelsport" },
         { id: "wt-specialty", labelId: "val-wt-specialty" }
     ];
     wtSliders.forEach(slider => {
@@ -1334,6 +1411,12 @@ function bindUIControls() {
     // Leaderboard search
     const leadSearch = document.getElementById("leaderboard-search");
     leadSearch.addEventListener("input", renderLeaderboardTable);
+
+    // Export CSV
+    const btnExport = document.getElementById("btn-export-csv");
+    if (btnExport) {
+        btnExport.addEventListener("click", exportPanelScoresToCSV);
+    }
     
     // Leaderboard bulk actions
     document.getElementById("btn-leaderboard-select-all").addEventListener("click", () => {
