@@ -31,18 +31,32 @@ let decayExponent = 1.3;
 let maxViewingDistance = 15.0;
 let viewingConeAngle = 60.0;
 
+// let categoryWeights = {
+//     farmers: 0.9,
+//     davidjones: 0.9,
+//     hm: 0.7,
+//     woolworths: 0.8,
+//     jbhifi: 0.85,
+//     foodcourt: 0.95,
+//     noelleeming: 0.4,
+//     archiebrothers: 0.35,
+//     rebelsport: 0.4,
+//     specialty: 0.3
+// };
+
 let categoryWeights = {
-    farmers: 0.9,
-    davidjones: 0.9,
-    hm: 0.7,
-    woolworths: 0.8,
-    jbhifi: 0.85,
-    foodcourt: 0.95,
+    farmers: 0.45,
+    davidjones: .16,
+    hm: 0.26,
+    woolworths: 0.70,
+    jbhifi: 0.30,
+    foodcourt: 0.78,
     noelleeming: 0.4,
     archiebrothers: 0.35,
     rebelsport: 0.4,
-    specialty: 0.3
+    specialty: 0.5
 };
+
 
 // Simulation Execution Statistics
 let simulatedAgentsData = [];

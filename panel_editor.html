@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Westfield Newmarket Panel Editor</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="leaflet.css" />
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar controls -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>Panel Editor</h1>
+                <p class="subtitle">Drag markers or edit values to position sensors</p>
+                <div class="nav-links" style="margin-top: 10px; display: flex; gap: 8px;">
+                    <a href="index.html" class="btn btn-sm btn-secondary" style="text-decoration: none; display: inline-block; width: 100%;">📊 Back to Simulation</a>
+                </div>
+            </div>
+
+            <div class="sidebar-content">
+                <!-- Editor Fields for currently selected panel -->
+                <div class="section" id="editor-selection-section">
+                    <div class="section-header" style="border-left-color: var(--color-pink);">
+                        <span class="icon">✏️</span>
+                        <h2>Interactive Adjustments</h2>
+                    </div>
+
+                    <div id="editor-no-selection" style="color: #64748b; font-size: 12px; text-align: center; padding: 1.5rem 0;">
+                        Click a panel marker on the map or select from the list below to begin editing.
+                    </div>
+
+                    <div id="editor-form" style="display: none;">
+                        <div class="editor-field">
+                            <label>Selected Panel Name</label>
+                            <input type="text" id="edit-panel-name" disabled style="opacity: 0.5;" />
+                        </div>
+                        
+                        <div class="editor-field">
+                            <label>Floor Level</label>
+                            <select id="edit-panel-floor">
+                                <option value="1">Level 1</option>
+                                <option value="2">Level 2</option>
+                                <option value="3">Level 3</option>
+                            </select>
+                        </div>
+
+                        <div class="editor-field">
+                            <label>
+                                <span>Orientation (0 - 360°)</span>
+                                <span class="control-val" id="val-edit-orientation" style="color: var(--color-pink); background: rgba(236, 72, 153, 0.08);">0°</span>
+                            </label>
+                            <input type="range" id="edit-panel-orientation" min="0" max="360" value="0" />
+                        </div>
+
+                        <div class="editor-field">
+                            <label>Latitude</label>
+                            <input type="number" id="edit-panel-lat" step="0.000001" />
+                        </div>
+
+                        <div class="editor-field">
+                            <label>Longitude</label>
+                            <input type="number" id="edit-panel-lon" step="0.000001" />
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Panels List for Selection -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">🔍</span>
+                        <h2>Panels Directory</h2>
+                    </div>
+                    <div class="search-wrapper" style="margin-bottom: 12px; min-width: 100%;">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="editor-search" placeholder="Search panels..." style="width: 100%;" />
+                    </div>
+                    <div class="panels-grid-container" id="editor-panels-grid" style="max-height: 280px;">
+                        <div class="loading-placeholder">
+                            <div class="spinner"></div>
+                            <p>Loading panels...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Export/Download action -->
+                <div class="sidebar-actions" style="margin-top: 1.50rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                    <button id="btn-download-csv" class="btn btn-primary btn-glow" style="width: 100%;">💾 Download Updated CSV</button>
+                    <p class="help-text" style="text-align: center; margin-top: 6px;">
+                        Replace your local <b>panel_locations_with_floor.csv</b> with this file to run simulator on new positions.
+                    </p>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Map container -->
+        <main class="main-content" style="padding: 0; position: relative;">
+            <div id="map" style="border-radius: 0; width: 100%; height: 100%;"></div>
+            
+            <!-- Floor switcher overlay inside the map container -->
+            <div class="floor-selector" style="top: 10px; left: 50px;">
+                <button class="floor-btn active" data-floor="1">Level 1</button>
+                <button class="floor-btn" data-floor="2">Level 2</button>
+                <button class="floor-btn" data-floor="3">Level 3</button>
+            </div>
+        </main>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="leaflet.js"></script>
+    <!-- Editor Logic script -->
+    <script src="panel_editor.js"></script>
+</body>
+</html>

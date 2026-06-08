@@ -1123,3 +1123,58 @@ input[type="range"]::-webkit-slider-thumb:hover {
     background-color: rgba(255, 255, 255, 0.08) !important;
     color: #ffffff !important;
 }
+
+/* Panel Editor Specific Styles */
+.editor-controls {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.editor-field {
+    margin-bottom: 0.85rem;
+}
+
+.editor-field label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #64748b;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.editor-field input[type="text"],
+.editor-field input[type="number"],
+.editor-field select {
+    width: 100%;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: #ffffff;
+    font-family: var(--font-body);
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.editor-field input:focus,
+.editor-field select:focus {
+    border-color: var(--color-cyan);
+    box-shadow: 0 0 8px rgba(6, 182, 212, 0.15);
+}
+
+.panel-card-select.editor-selected {
+    border-color: var(--color-cyan) !important;
+    background: rgba(6, 182, 212, 0.04) !important;
+    box-shadow: 0 0 8px rgba(6, 182, 212, 0.1) !important;
+}
+
+.panel-marker-selected {
+    background-color: var(--color-cyan) !important;
+    box-shadow: 0 0 12px var(--color-cyan-glow) !important;
+}
