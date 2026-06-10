@@ -328,7 +328,7 @@ input:checked + .slider:before {
 .floor-selector {
     position: absolute;
     top: 20px;
-    left: 400px;
+    left: calc(380px + 20px);
     z-index: 1000;
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
@@ -339,6 +339,12 @@ input:checked + .slider:before {
     box-shadow: var(--shadow-premium);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
+}
+
+@media (max-width: 1200px) {
+    .floor-selector {
+        left: 20px;
+    }
 }
 
 .floor-btn {

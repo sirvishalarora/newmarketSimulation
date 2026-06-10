@@ -130,67 +130,89 @@
                 </div>
 
                 <!-- Attractiveness Weights -->
-                <div class="section">
-                    <div class="section-title">Destination Weights</div>
-                    
-                    <div class="control-group">
-                        <div class="control-label">
-                            Farmers (Anchor)
-                            <span class="control-val" id="val-wt-farmers">90%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="90" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            David Jones (Anchor)
-                            <span class="control-val" id="val-wt-davidjones">90%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="90" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            H&M (Anchor)
-                            <span class="control-val" id="val-wt-hm">70%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="70" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            Woolworths (Supermarket)
-                            <span class="control-val" id="val-wt-woolworths">80%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-woolworths" min="0" max="100" value="80" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            JB Hi-Fi / Electronics
-                            <span class="control-val" id="val-wt-jbhifi">85%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-jbhifi" min="0" max="100" value="85" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            Food Court / Dining
-                            <span class="control-val" id="val-wt-foodcourt">95%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="95" />
-                    </div>
-
-                    <div class="control-group">
-                        <div class="control-label">
-                            Specialty Retail
-                            <span class="control-val" id="val-wt-specialty">30%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="30" />
-                    </div>
+            <div class="category-weights-title">Store Category Attractiveness</div>
+            
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Farmers (Anchor)</span>
+                    <span class="control-val" id="val-wt-farmers">45%</span>
                 </div>
+                <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="45" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>David Jones (Anchor)</span>
+                    <span class="control-val" id="val-wt-davidjones">16%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="16" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>H&M (Anchor)</span>
+                    <span class="control-val" id="val-wt-hm">26%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="26" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Woolworths (Supermarket)</span>
+                    <span class="control-val" id="val-wt-woolworths">70%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-woolworths" min="0" max="100" value="70" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>JB Hi-Fi / Electronics</span>
+                    <span class="control-val" id="val-wt-jbhifi">30%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-jbhifi" min="0" max="100" value="30" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Food Court / Dining</span>
+                    <span class="control-val" id="val-wt-foodcourt">78%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="78" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Noel Leeming</span>
+                    <span class="control-val" id="val-wt-noelleeming">40%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-noelleeming" min="0" max="100" value="40" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Archie Brothers</span>
+                    <span class="control-val" id="val-wt-archiebrothers">35%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-archiebrothers" min="0" max="100" value="35" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Rebel Sport</span>
+                    <span class="control-val" id="val-wt-rebelsport">40%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-rebelsport" min="0" max="100" value="40" />
+            </div>
+
+            <div class="control-group wt-group">
+                <div class="control-label">
+                    <span>Specialty Retail</span>
+                    <span class="control-val" id="val-wt-specialty">50%</span>
+                </div>
+                <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="50" />
             </div>
         </div>
+    </div>
 
         <!-- Floor Selector Overlay -->
         <div class="floor-selector">
