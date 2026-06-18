@@ -208,6 +208,19 @@
                     </div>
                 </div>
 
+                <!-- Profile Configuration -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">💾</span>
+                        <h2>Profile Configuration</h2>
+                    </div>
+                    <div class="sidebar-actions" style="margin-top: 10px; display: flex; gap: 8px; padding: 0;">
+                        <button id="btn-export-config" class="btn btn-sm btn-secondary" style="flex: 1; padding: 8px 4px; font-size: 11px;">Export JSON</button>
+                        <button id="btn-import-config-trigger" class="btn btn-sm btn-secondary" style="flex: 1; padding: 8px 4px; font-size: 11px;">Import JSON</button>
+                        <input type="file" id="input-import-config" accept=".json" style="display: none;" />
+                    </div>
+                </div>
+
                 <!-- Simulation Execution Trigger -->
                 <div class="sidebar-actions">
                     <button id="btn-run" class="btn btn-primary btn-glow">Execute Simulation</button>
@@ -282,26 +295,73 @@
 
                     <!-- RESULTS STATE: Executive summary metrics -->
                     <div id="state-results-summary" class="card-inner fade-in" style="display: none;">
-                        <div class="card-inner-header">
-                            <h2>Exposure Coverage</h2>
-                            <p class="subtitle">Key interaction metrics for selected panels</p>
+                        <div class="card-inner-header-tabs">
+                            <button class="result-tab active" id="btn-tab-coverage">Exposure Coverage</button>
+                            <button class="result-tab" id="btn-tab-similarity">Sensor Similarity</button>
                         </div>
-                        <div class="results-stats-body">
-                            <div class="result-metric-item">
-                                <span class="label">Coverage Rate</span>
-                                <span class="value neon-green" id="coverage-rate">0.00%</span>
+                        
+                        <!-- Tab 1: Coverage Metrics -->
+                        <div id="tab-content-coverage" class="tab-content active-content">
+                            <div class="results-stats-body" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 15px;">
+                                <div class="result-metric-item">
+                                    <span class="label">Coverage Rate</span>
+                                    <span class="value neon-green" id="coverage-rate">0.00%</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Unique Crossed</span>
+                                    <span class="value neon-pink" id="unique-cross-count">0</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Total Detections</span>
+                                    <span class="value neon-purple" id="res-total-crossings">0</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Simulated Agents</span>
+                                    <span class="value neon-cyan" id="res-total-agents">0</span>
+                                </div>
                             </div>
-                            <div class="result-metric-item">
-                                <span class="label">Unique Crossed</span>
-                                <span class="value neon-pink" id="unique-cross-count">0</span>
+                        </div>
+                        
+                        <!-- Tab 2: Panel Similarity -->
+                        <div id="tab-content-similarity" class="tab-content" style="display: none; flex: 1; flex-direction: column; justify-content: space-between; margin-top: 15px;">
+                            <!-- Metric Selector -->
+                            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
+                                <label style="font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600;">Metric:</label>
+                                <select id="similarity-metric-select" class="similarity-select" style="flex: 1; padding: 4px 8px; font-size: 12px;">
+                                    <option value="jaccard">Jaccard Similarity</option>
+                                    <option value="cosine">Cosine Similarity</option>
+                                    <option value="overlap">Raw Overlap Count</option>
+                                </select>
                             </div>
-                            <div class="result-metric-item">
-                                <span class="label">Total Detections</span>
-                                <span class="value neon-purple" id="res-total-crossings">0</span>
+                            
+                            <!-- Reference status -->
+                            <div class="reference-panel-status" id="ref-panel-status" style="margin: 4px 0 8px 0; padding: 6px 10px;">
+                                <span class="text-muted" style="font-size: 11px; text-align: center; width: 100%;">Click map sensor or row to select reference</span>
                             </div>
-                            <div class="result-metric-item">
-                                <span class="label">Simulated Agents</span>
-                                <span class="value neon-cyan" id="res-total-agents">0</span>
+                            
+                            <!-- Detailed Comparison dropdowns & Venn bar -->
+                            <div class="detailed-comparison-card" style="padding: 10px; margin-top: 0;">
+                                <div class="comparison-selectors" style="margin-bottom: 8px; gap: 6px;">
+                                    <select id="compare-panel-a" class="similarity-select" style="padding: 4px 6px; font-size: 11px;"></select>
+                                    <span class="vs-text" style="font-size: 10px;">VS</span>
+                                    <select id="compare-panel-b" class="similarity-select" style="padding: 4px 6px; font-size: 11px;"></select>
+                                </div>
+                                <div id="comparison-results" class="comparison-results-container">
+                                    <div class="no-selection-msg" style="padding: 4px 0; font-size: 10px;">Select two sensors to compare</div>
+                                </div>
+                            </div>
+
+                            <!-- Raw Vector Export -->
+                            <div class="vector-export-card" style="margin-top: 10px; padding: 10px; border-top: 1px solid var(--border-color);">
+                                <div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 600; margin-bottom: 6px;">Raw Exposure Vector Export</div>
+                                <div style="display: flex; gap: 6px; align-items: center;">
+                                    <select id="select-vector-format" class="similarity-select" style="flex: 1.2; padding: 4px 6px; font-size: 11px;">
+                                        <option value="binary">Binary String (00110...)</option>
+                                        <option value="base64">Base64 Compressed Bits</option>
+                                        <option value="sparse">Sparse Indices (3,5,10...)</option>
+                                    </select>
+                                    <button id="btn-export-vectors" class="btn btn-sm btn-primary" style="flex: 1; padding: 4px 8px; font-size: 11px;">Export Data</button>
+                                </div>
                             </div>
                         </div>
                     </div>

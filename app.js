@@ -14,6 +14,11 @@ let distanceMatrix = {}; // sourceNodeId -> { targetNodeId: distance }
 let pathCache = {}; // sourceNodeId -> { targetNodeId: pathArray }
 let panels = [];
 
+// Similarity State
+let selectedReferencePanel = null;
+let selectedSimilarityMetric = "jaccard";
+
+
 // Map Layer groups
 let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.featureGroup() };
 let graphLayer = L.layerGroup();
@@ -366,6 +371,7 @@ function loadPanels() {
             renderPanelsSelectionGrid();
             renderPanelMarkers();
             renderPanelCones();
+            populateComparisonDropdowns();
         })
         .catch(err => {
             console.error("Error loading CSV panels:", err);
@@ -396,7 +402,39 @@ function renderPanelMarkers() {
         if (panel.crossedAgents.size > 0) {
             tooltipContent += `<br>Unique Crossed: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
         }
+        
+        // If a reference panel is selected, append similarity details to tooltip
+        if (selectedReferencePanel) {
+            if (panel.id === selectedReferencePanel.id) {
+                tooltipContent += `<br><strong style="color: #fbbf24;">(Selected Reference Panel)</strong>`;
+            } else if (panel.crossedAgents.size > 0 || selectedReferencePanel.crossedAgents.size > 0) {
+                const score = getPanelSimilarity(selectedReferencePanel, panel, selectedSimilarityMetric);
+                let formattedScore = "";
+                if (selectedSimilarityMetric === "jaccard") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Jaccard)`;
+                } else if (selectedSimilarityMetric === "cosine") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Cosine)`;
+                } else {
+                    formattedScore = `${score.toLocaleString()} agents (Overlap)`;
+                }
+                tooltipContent += `<br><span style="color: #c084fc; font-weight: 600;">Similarity: ${formattedScore}</span>`;
+            }
+        }
+        
         marker.bindTooltip(tooltipContent, { direction: 'top' });
+        
+        // Map click selecting reference
+        marker.on('click', () => {
+            selectReferencePanel(panel.id);
+        });
+        
+        // Keep similarity colors updated when marker is re-added
+        marker.on('add', () => {
+            setTimeout(() => {
+                updateMapSimilarityColoring();
+            }, 0);
+        });
+        
         panel.marker = marker;
         
         // Show marker only if on active floor
@@ -438,11 +476,38 @@ function renderPanelCones() {
         // Close the wedge polygon
         points.push([centerLat, centerLon]);
         
+        // Determine color based on similarity if a reference panel is selected
+        let coneColor = '#ec4899'; // default pink
+        let coneFillOpacity = 0.08;
+        let coneColorBorder = 'rgba(236, 72, 153, 0.35)';
+        
+        if (selectedReferencePanel) {
+            if (panel.id === selectedReferencePanel.id) {
+                coneColor = '#fbbf24'; // gold
+                coneFillOpacity = 0.25;
+                coneColorBorder = 'rgba(251, 191, 36, 0.6)';
+            } else {
+                const score = getPanelSimilarity(selectedReferencePanel, panel, selectedSimilarityMetric);
+                const normalized = normalizeScore(score, selectedSimilarityMetric, selectedReferencePanel);
+                
+                if (normalized > 0.0001) {
+                    const rgb = getSimilarityColor(normalized);
+                    coneColor = rgb;
+                    coneFillOpacity = 0.05 + 0.25 * normalized; // higher opacity for higher similarity
+                    coneColorBorder = rgb.replace("rgb", "rgba").replace(")", ", 0.5)");
+                } else {
+                    coneColor = '#4b5563'; // neutral grey for 0 similarity
+                    coneFillOpacity = 0.02;
+                    coneColorBorder = 'rgba(75, 85, 99, 0.2)';
+                }
+            }
+        }
+        
         const wedge = L.polygon(points, {
-            color: 'rgba(236, 72, 153, 0.35)',
+            color: coneColorBorder,
             weight: 1,
-            fillColor: '#ec4899',
-            fillOpacity: 0.08,
+            fillColor: coneColor,
+            fillOpacity: coneFillOpacity,
             interactive: false
         });
         
@@ -801,6 +866,11 @@ function runSimulation() {
                 renderCharts();
                 renderLeaderboardTable();
                 
+                // Populate dropdown lists and refresh similarity values
+                populateComparisonDropdowns();
+                updateDetailedComparison();
+                updateReferencePanelUI();
+                
                 // Refresh Map Visual overlays with counts in tooltips
                 updatePanelMapVisuals();
                 
@@ -1155,7 +1225,11 @@ function renderLeaderboardTable() {
         
         const tr = document.createElement("tr");
         tr.id = `row-${panel.id}`;
-        if (!isChecked) tr.className = "inactive-row";
+        
+        let trClass = "";
+        if (!isChecked) trClass += "inactive-row ";
+        if (selectedReferencePanel && selectedReferencePanel.id === panel.id) trClass += "reference-active";
+        if (trClass) tr.className = trClass.trim();
         
         tr.innerHTML = `
             <td><div class="${rankBadgeClass}">${index + 1}</div></td>
@@ -1193,6 +1267,14 @@ function renderLeaderboardTable() {
             updateSelectedPanelsHeaderCount();
         });
         
+        // Select as reference on row click (if checkbox is not clicked)
+        tr.addEventListener("click", (e) => {
+            if (e.target.tagName === "INPUT" && e.target.type === "checkbox") {
+                return;
+            }
+            selectReferencePanel(panel.id);
+        });
+        
         tbody.appendChild(tr);
     });
 }
@@ -1202,6 +1284,25 @@ function exportPanelScoresToCSV() {
     if (!panels || panels.length === 0) return;
     
     const sortedPanels = [...panels].sort((a, b) => b.crossedAgents.size - a.crossedAgents.size);
+    const activePanelsCount = panels.filter(p => document.getElementById(`chk-${p.id}`)?.checked).length;
+    
+    const metadata = [
+        `# Westfield Newmarket Pedestrian Gravity Simulation Portal - Panel Scores Report`,
+        `# Export Timestamp: ${new Date().toISOString()}`,
+        `#`,
+        `# --- SIMULATION CONFIGURATION PARAMETERS ---`,
+        `# Total Agents: ${totalAgentsToSimulate.toLocaleString()}`,
+        `# Min Shop Visits: ${minShopVisits}`,
+        `# Max Shop Visits: ${maxShopVisits}`,
+        `# Base Walking Speed (m/s): ${baseWalkSpeedMS}`,
+        `# Huff Decay Exponent (alpha): ${decayExponent}`,
+        `# Max Viewing Distance (m): ${maxViewingDistance}`,
+        `# Viewing Cone Angle: ${viewingConeAngle}°`,
+        `# Active Sensors: ${activePanelsCount} / ${panels.length}`,
+        `# Store Category Weights: ${JSON.stringify(categoryWeights)}`,
+        `# -------------------------------------------`,
+        `#`
+    ];
     
     const headers = [
         "Rank",
@@ -1233,7 +1334,9 @@ function exportPanelScoresToCSV() {
         ];
     });
     
-    const csvContent = [headers.join(",")].concat(rows.map(row => row.join(","))).join("\n");
+    const csvContent = metadata.concat([headers.join(",")])
+                               .concat(rows.map(row => row.join(",")))
+                               .join("\n");
     
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1414,6 +1517,26 @@ function bindUIControls() {
         
         document.getElementById("btn-reset").setAttribute("disabled", "true");
         
+        // Reset tabs
+        const tabCoverage = document.getElementById("btn-tab-coverage");
+        const tabSimilarity = document.getElementById("btn-tab-similarity");
+        const contentCoverage = document.getElementById("tab-content-coverage");
+        const contentSimilarity = document.getElementById("tab-content-similarity");
+        if (tabCoverage && tabSimilarity) {
+            tabCoverage.classList.add("active");
+            tabSimilarity.classList.remove("active");
+            contentCoverage.style.display = "block";
+            contentSimilarity.style.display = "none";
+        }
+        
+        // Clear similarity reference
+        clearReferencePanel();
+        const compA = document.getElementById("compare-panel-a");
+        const compB = document.getElementById("compare-panel-b");
+        if (compA) compA.value = "";
+        if (compB) compB.value = "";
+        updateDetailedComparison();
+        
         // Clear counts
         panels.forEach(p => p.crossedAgents.clear());
         
@@ -1458,6 +1581,609 @@ function bindUIControls() {
         updatePanelMapVisuals();
         updateSelectedPanelsHeaderCount();
     });
+    
+    // Tab switching listeners
+    const tabCoverage = document.getElementById("btn-tab-coverage");
+    const tabSimilarity = document.getElementById("btn-tab-similarity");
+    const contentCoverage = document.getElementById("tab-content-coverage");
+    const contentSimilarity = document.getElementById("tab-content-similarity");
+    
+    if (tabCoverage && tabSimilarity) {
+        tabCoverage.addEventListener("click", () => {
+            tabCoverage.classList.add("active");
+            tabSimilarity.classList.remove("active");
+            contentCoverage.style.display = "block";
+            contentSimilarity.style.display = "none";
+        });
+        
+        tabSimilarity.addEventListener("click", () => {
+            tabSimilarity.classList.add("active");
+            tabCoverage.classList.remove("active");
+            contentCoverage.style.display = "none";
+            contentSimilarity.style.display = "flex";
+        });
+    }
+    
+    // Similarity metric change listener
+    const metricSelect = document.getElementById("similarity-metric-select");
+    if (metricSelect) {
+        metricSelect.addEventListener("change", (e) => {
+            selectedSimilarityMetric = e.target.value;
+            updateMapSimilarityColoring();
+            renderPanelCones();
+        });
+    }
+    
+    // Detailed Comparison dropdowns change listeners
+    const compareA = document.getElementById("compare-panel-a");
+    const compareB = document.getElementById("compare-panel-b");
+    if (compareA) {
+        compareA.addEventListener("change", () => {
+            updateDetailedComparison();
+        });
+    }
+    if (compareB) {
+        compareB.addEventListener("change", () => {
+            updateDetailedComparison();
+        });
+    }
+    
+    // JSON Profile Configuration Listeners
+    const btnExportConfig = document.getElementById("btn-export-config");
+    if (btnExportConfig) {
+        btnExportConfig.addEventListener("click", exportConfigJSON);
+    }
+    
+    const btnImportConfigTrigger = document.getElementById("btn-import-config-trigger");
+    const fileInput = document.getElementById("input-import-config");
+    if (btnImportConfigTrigger && fileInput) {
+        btnImportConfigTrigger.addEventListener("click", () => {
+            fileInput.click();
+        });
+        fileInput.addEventListener("change", importConfigJSON);
+    }
+    
+    // Raw Vector Export Listener
+    const btnExportVectors = document.getElementById("btn-export-vectors");
+    if (btnExportVectors) {
+        btnExportVectors.addEventListener("click", exportInteractionVectors);
+    }
+}
+
+// Panel Similarity Helper Functions
+function getPanelSimilarity(panelA, panelB, metricType) {
+    const setA = panelA.crossedAgents;
+    const setB = panelB.crossedAgents;
+    
+    if (setA.size === 0 && setB.size === 0) return 0;
+    
+    // Intersection size
+    let intersectionSize = 0;
+    if (setA.size < setB.size) {
+        for (let agentId of setA) {
+            if (setB.has(agentId)) intersectionSize++;
+        }
+    } else {
+        for (let agentId of setB) {
+            if (setA.has(agentId)) intersectionSize++;
+        }
+    }
+    
+    if (metricType === "jaccard") {
+        const unionSize = setA.size + setB.size - intersectionSize;
+        return unionSize === 0 ? 0 : intersectionSize / unionSize;
+    } else if (metricType === "cosine") {
+        const denom = Math.sqrt(setA.size * setB.size);
+        return denom === 0 ? 0 : intersectionSize / denom;
+    } else if (metricType === "overlap") {
+        return intersectionSize;
+    }
+    return 0;
+}
+
+function normalizeScore(score, metricType, refPanel) {
+    if (metricType === "overlap") {
+        if (!refPanel || refPanel.crossedAgents.size === 0) return 0;
+        return score / refPanel.crossedAgents.size;
+    }
+    return score;
+}
+
+function getSimilarityColor(score) {
+    if (score <= 0.0001) {
+        return "rgb(75, 85, 99)"; // neutral grey
+    }
+    const r = Math.round(99 + (236 - 99) * score);
+    const g = Math.round(102 + (72 - 102) * score);
+    const b = Math.round(241 + (153 - 241) * score);
+    return `rgb(${r}, ${g}, ${b})`;
+}
+
+function updateMapSimilarityColoring() {
+    panels.forEach(panel => {
+        if (!panel.marker) return;
+        
+        const element = panel.marker.getElement();
+        if (!element) return;
+        
+        const innerIcon = element.querySelector('.panel-marker-inner');
+        if (!innerIcon) return;
+        
+        innerIcon.style.backgroundColor = "";
+        innerIcon.style.boxShadow = "";
+        innerIcon.style.border = "";
+        innerIcon.classList.remove("reference-marker");
+        
+        let tooltipContent = `<b>${panel.name}</b><br>Floor: L${panel.floor}<br>Orient: ${panel.orientation}°<br>Unique Crossed: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
+        
+        if (selectedReferencePanel) {
+            if (panel.id === selectedReferencePanel.id) {
+                innerIcon.style.backgroundColor = "#fbbf24";
+                innerIcon.style.boxShadow = "0 0 12px #fbbf24";
+                innerIcon.style.border = "2px solid #ffffff";
+                innerIcon.classList.add("reference-marker");
+                tooltipContent += `<br><strong style="color: #fbbf24;">(Selected Reference Panel)</strong>`;
+            } else {
+                const score = getPanelSimilarity(selectedReferencePanel, panel, selectedSimilarityMetric);
+                const normalized = normalizeScore(score, selectedSimilarityMetric, selectedReferencePanel);
+                const color = getSimilarityColor(normalized);
+                
+                innerIcon.style.backgroundColor = color;
+                innerIcon.style.boxShadow = `0 0 8px ${color}`;
+                
+                let formattedScore = "";
+                if (selectedSimilarityMetric === "jaccard") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Jaccard)`;
+                } else if (selectedSimilarityMetric === "cosine") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Cosine)`;
+                } else {
+                    formattedScore = `${score.toLocaleString()} agents (Overlap)`;
+                }
+                tooltipContent += `<br><span style="color: #c084fc; font-weight: 600;">Similarity: ${formattedScore}</span>`;
+            }
+        }
+        
+        panel.marker.setTooltipContent(tooltipContent);
+    });
+}
+
+function selectReferencePanel(panelId) {
+    const panel = panels.find(p => p.id === panelId);
+    if (!panel) return;
+    
+    if (selectedReferencePanel && selectedReferencePanel.id === panelId) {
+        clearReferencePanel();
+        return;
+    }
+    
+    selectedReferencePanel = panel;
+    
+    updateReferencePanelUI();
+    updateMapSimilarityColoring();
+    renderPanelCones();
+    renderLeaderboardTable();
+    
+    const selectA = document.getElementById("compare-panel-a");
+    if (selectA) {
+        selectA.value = panelId;
+        updateDetailedComparison();
+    }
+}
+
+function clearReferencePanel() {
+    selectedReferencePanel = null;
+    
+    updateReferencePanelUI();
+    updateMapSimilarityColoring();
+    renderPanelCones();
+    renderLeaderboardTable();
+}
+
+function updateReferencePanelUI() {
+    const el = document.getElementById("ref-panel-status");
+    if (!el) return;
+    
+    if (selectedReferencePanel) {
+        el.innerHTML = `
+            <div class="ref-panel-details">
+                <span class="ref-panel-label">Reference Panel (Panel A)</span>
+                <span class="ref-panel-val">${selectedReferencePanel.id} (L${selectedReferencePanel.floor}) • ${selectedReferencePanel.crossedAgents.size.toLocaleString()} agents</span>
+            </div>
+            <button class="btn-clear-ref" id="btn-clear-reference">Clear</button>
+        `;
+        document.getElementById("btn-clear-reference").addEventListener("click", (e) => {
+            e.stopPropagation();
+            clearReferencePanel();
+        });
+    } else {
+        el.innerHTML = `<span class="text-muted" style="font-size: 11px; text-align: center; width: 100%;">Click map sensor or row to select reference</span>`;
+    }
+}
+
+function populateComparisonDropdowns() {
+    const selectA = document.getElementById("compare-panel-a");
+    const selectB = document.getElementById("compare-panel-b");
+    
+    if (!selectA || !selectB) return;
+    
+    const valA = selectA.value;
+    const valB = selectB.value;
+    
+    selectA.innerHTML = '<option value="">Select Panel A</option>';
+    selectB.innerHTML = '<option value="">Select Panel B</option>';
+    
+    const sortedPanels = [...panels].sort((a, b) => a.id.localeCompare(b.id));
+    
+    sortedPanels.forEach(panel => {
+        const optA = document.createElement("option");
+        optA.value = panel.id;
+        optA.textContent = `Panel ${panel.id} (L${panel.floor})`;
+        selectA.appendChild(optA);
+        
+        const optB = document.createElement("option");
+        optB.value = panel.id;
+        optB.textContent = `Panel ${panel.id} (L${panel.floor})`;
+        selectB.appendChild(optB);
+    });
+    
+    selectA.value = valA;
+    selectB.value = valB;
+}
+
+function updateDetailedComparison() {
+    const selectA = document.getElementById("compare-panel-a");
+    const selectB = document.getElementById("compare-panel-b");
+    const resultsContainer = document.getElementById("comparison-results");
+    
+    if (!selectA || !selectB || !resultsContainer) return;
+    
+    const idA = selectA.value;
+    const idB = selectB.value;
+    
+    if (!idA || !idB) {
+        resultsContainer.innerHTML = `<div class="no-selection-msg">Select two sensors to compare</div>`;
+        return;
+    }
+    
+    if (idA === idB) {
+        resultsContainer.innerHTML = `<div class="no-selection-msg" style="color: var(--accent-red);">Select different sensors to compare</div>`;
+        return;
+    }
+    
+    const panelA = panels.find(p => p.id === idA);
+    const panelB = panels.find(p => p.id === idB);
+    
+    if (!panelA || !panelB) return;
+    
+    const setA = panelA.crossedAgents;
+    const setB = panelB.crossedAgents;
+    
+    let sharedCount = 0;
+    for (let agentId of setA) {
+        if (setB.has(agentId)) sharedCount++;
+    }
+    
+    const jaccard = getPanelSimilarity(panelA, panelB, "jaccard");
+    const cosine = getPanelSimilarity(panelA, panelB, "cosine");
+    
+    const onlyA = setA.size - sharedCount;
+    const onlyB = setB.size - sharedCount;
+    const totalUnique = onlyA + sharedCount + onlyB;
+    
+    let pctA = 0;
+    let pctShared = 0;
+    let pctB = 0;
+    
+    if (totalUnique > 0) {
+        pctA = (onlyA / totalUnique) * 100;
+        pctShared = (sharedCount / totalUnique) * 100;
+        pctB = (onlyB / totalUnique) * 100;
+    }
+    
+    resultsContainer.innerHTML = `
+        <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Panel A unique agents</span>
+            <span class="comparison-metric-val" style="color: #3b82f6;">${setA.size.toLocaleString()}</span>
+        </div>
+        <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Panel B unique agents</span>
+            <span class="comparison-metric-val" style="color: #ec4899;">${setB.size.toLocaleString()}</span>
+        </div>
+        <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Shared agents</span>
+            <span class="comparison-metric-val highlight-purple">${sharedCount.toLocaleString()}</span>
+        </div>
+        <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Jaccard Similarity</span>
+            <span class="comparison-metric-val">${(jaccard * 100).toFixed(1)}%</span>
+        </div>
+        <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Cosine Similarity</span>
+            <span class="comparison-metric-val">${(cosine * 100).toFixed(1)}%</span>
+        </div>
+        
+        <div class="overlap-bar-container">
+            <div class="overlap-bar-title">Audience Overlap (Unique total: ${totalUnique.toLocaleString()})</div>
+            <div class="overlap-bar-wrapper">
+                <div class="overlap-segment only-a" style="width: ${pctA}%;" title="Unique to A: ${onlyA.toLocaleString()} agents (${pctA.toFixed(1)}%)"></div>
+                <div class="overlap-segment shared" style="width: ${pctShared}%;" title="Shared: ${sharedCount.toLocaleString()} agents (${pctShared.toFixed(1)}%)"></div>
+                <div class="overlap-segment only-b" style="width: ${pctB}%;" title="Unique to B: ${onlyB.toLocaleString()} agents (${pctB.toFixed(1)}%)"></div>
+            </div>
+            <div class="overlap-bar-legend">
+                <span class="legend-item">
+                    <span class="legend-color-dot only-a"></span>
+                    Only A (${onlyA.toLocaleString()})
+                </span>
+                <span class="legend-item">
+                    <span class="legend-color-dot shared"></span>
+                    Shared (${sharedCount.toLocaleString()})
+                </span>
+                <span class="legend-item">
+                    <span class="legend-color-dot only-b"></span>
+                    Only B (${onlyB.toLocaleString()})
+                </span>
+            </div>
+        </div>
+    `;
+}
+
+// Simulation configuration JSON Export/Import helpers
+function exportConfigJSON() {
+    const config = {
+        timestamp: new Date().toISOString(),
+        totalAgents: parseInt(document.getElementById("input-total-agents").value),
+        minVisits: parseInt(document.getElementById("input-min-visits").value),
+        maxVisits: parseInt(document.getElementById("input-max-visits").value),
+        walkSpeed: parseFloat(document.getElementById("input-walk-speed").value),
+        decayExponent: parseFloat(document.getElementById("input-decay-exponent").value),
+        viewDist: parseFloat(document.getElementById("input-view-dist").value),
+        coneAngle: parseFloat(document.getElementById("input-cone-angle").value),
+        showGraph: document.getElementById("chk-show-graph").checked,
+        categoryWeights: {},
+        activePanelIds: []
+    };
+    
+    // Attractiveness weights
+    for (const cat in categoryWeights) {
+        const slider = document.getElementById(`wt-${cat}`);
+        if (slider) {
+            config.categoryWeights[cat] = parseInt(slider.value) / 100.0;
+        } else {
+            config.categoryWeights[cat] = categoryWeights[cat];
+        }
+    }
+    
+    // Active panels checkbox state
+    panels.forEach(p => {
+        const chk = document.getElementById(`chk-${p.id}`);
+        if (chk && chk.checked) {
+            config.activePanelIds.push(p.id);
+        }
+    });
+    
+    const jsonStr = JSON.stringify(config, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
+    link.setAttribute("download", `westfield_newmarket_sim_config_${dateStr}_${timeStr}.json`);
+    
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function importConfigJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const config = JSON.parse(e.target.result);
+            
+            // Set UI sliders & inputs
+            const sAgents = document.getElementById("input-total-agents");
+            if (sAgents && config.totalAgents !== undefined) {
+                sAgents.value = config.totalAgents;
+                sAgents.dispatchEvent(new Event("input"));
+            }
+            
+            const sMin = document.getElementById("input-min-visits");
+            if (sMin && config.minVisits !== undefined) {
+                sMin.value = config.minVisits;
+                sMin.dispatchEvent(new Event("input"));
+            }
+            
+            const sMax = document.getElementById("input-max-visits");
+            if (sMax && config.maxVisits !== undefined) {
+                sMax.value = config.maxVisits;
+                sMax.dispatchEvent(new Event("input"));
+            }
+            
+            const sSpeed = document.getElementById("input-walk-speed");
+            if (sSpeed && config.walkSpeed !== undefined) {
+                sSpeed.value = config.walkSpeed;
+                sSpeed.dispatchEvent(new Event("input"));
+            }
+            
+            const sDecay = document.getElementById("input-decay-exponent");
+            if (sDecay && config.decayExponent !== undefined) {
+                sDecay.value = config.decayExponent;
+                sDecay.dispatchEvent(new Event("input"));
+            }
+            
+            const sDist = document.getElementById("input-view-dist");
+            if (sDist && config.viewDist !== undefined) {
+                sDist.value = config.viewDist;
+                sDist.dispatchEvent(new Event("input"));
+            }
+            
+            const sAngle = document.getElementById("input-cone-angle");
+            if (sAngle && config.coneAngle !== undefined) {
+                sAngle.value = config.coneAngle;
+                sAngle.dispatchEvent(new Event("input"));
+            }
+            
+            const chkGraph = document.getElementById("chk-show-graph");
+            if (chkGraph && config.showGraph !== undefined) {
+                chkGraph.checked = config.showGraph;
+                chkGraph.dispatchEvent(new Event("change"));
+            }
+            
+            // Category weights
+            if (config.categoryWeights) {
+                for (const cat in config.categoryWeights) {
+                    const slider = document.getElementById(`wt-${cat}`);
+                    if (slider) {
+                        slider.value = Math.round(config.categoryWeights[cat] * 100);
+                        slider.dispatchEvent(new Event("input"));
+                    }
+                }
+            }
+            
+            // Active panels
+            if (config.activePanelIds) {
+                const activeSet = new Set(config.activePanelIds);
+                panels.forEach(p => {
+                    const chk = document.getElementById(`chk-${p.id}`);
+                    if (chk) {
+                        chk.checked = activeSet.has(p.id);
+                        chk.dispatchEvent(new Event("change"));
+                    }
+                });
+            }
+            
+            // Clear file input value to allow uploading same file again
+            event.target.value = "";
+            alert("Configuration profile imported successfully!");
+            
+        } catch(err) {
+            console.error("Failed to parse JSON config file:", err);
+            alert("Error: Invalid configuration file format.");
+        }
+    };
+    reader.readAsText(file);
+}
+
+// Raw Exposure Vector Export
+function exportInteractionVectors() {
+    if (!panels || panels.length === 0) {
+        alert("No panels loaded.");
+        return;
+    }
+    
+    // Check if simulation has been run (crossedAgents has data)
+    const hasData = panels.some(p => p.crossedAgents.size > 0);
+    if (!hasData) {
+        alert("Please run the simulation first to populate agent interactions.");
+        return;
+    }
+    
+    const format = document.getElementById("select-vector-format").value;
+    const numAgents = totalAgentsToSimulate;
+    
+    const headers = ["Panel ID", "Format", "Interaction Data"];
+    const rows = [];
+    
+    panels.forEach(panel => {
+        const set = panel.crossedAgents;
+        let vectorData = "";
+        
+        if (format === "binary") {
+            const arr = new Array(numAgents).fill('0');
+            set.forEach(agentId => {
+                let agentIndex;
+                if (typeof agentId === 'string') {
+                    agentIndex = parseInt(agentId.replace("agent_", ""), 10);
+                } else {
+                    agentIndex = parseInt(agentId, 10);
+                }
+                if (isNaN(agentIndex)) return;
+                
+                const idx = agentIndex - 1;
+                if (idx >= 0 && idx < numAgents) {
+                    arr[idx] = '1';
+                }
+            });
+            vectorData = arr.join('');
+            
+        } else if (format === "base64") {
+            const numBytes = Math.ceil(numAgents / 8);
+            const bytes = new Uint8Array(numBytes);
+            set.forEach(agentId => {
+                let agentIndex;
+                if (typeof agentId === 'string') {
+                    agentIndex = parseInt(agentId.replace("agent_", ""), 10);
+                } else {
+                    agentIndex = parseInt(agentId, 10);
+                }
+                if (isNaN(agentIndex)) return;
+                
+                const idx = agentIndex - 1;
+                if (idx >= 0 && idx < numAgents) {
+                    const byteIdx = Math.floor(idx / 8);
+                    const bitIdx = 7 - (idx % 8); // MSB-first bit order
+                    bytes[byteIdx] |= (1 << bitIdx);
+                }
+            });
+            let binaryStr = "";
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binaryStr += String.fromCharCode(bytes[i]);
+            }
+            vectorData = btoa(binaryStr);
+            
+        } else if (format === "sparse") {
+            const indices = Array.from(set)
+                .map(agentId => {
+                    if (typeof agentId === 'string') {
+                        return parseInt(agentId.replace("agent_", ""), 10);
+                    }
+                    return parseInt(agentId, 10);
+                })
+                .filter(idx => !isNaN(idx))
+                .sort((a, b) => a - b);
+            vectorData = indices.join(';');
+        }
+        
+        rows.push([
+            `"${panel.name}"`,
+            `"${format}"`,
+            `"${vectorData}"`
+        ]);
+    });
+    
+    const metadata = [
+        `# Westfield Newmarket Pedestrian Gravity Simulation - Raw Exposure Vectors`,
+        `# Export Date: ${new Date().toISOString()}`,
+        `# Total Agents: ${numAgents.toLocaleString()}`,
+        `# Vector Format: ${format}`,
+        `# Note: Sparse indices are separated by semicolons (;) to preserve CSV columns.`,
+        `#`
+    ];
+    
+    const csvContent = metadata.concat([headers.join(",")])
+                               .concat(rows.map(row => row.join(",")))
+                               .join("\n");
+                               
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
+    link.setAttribute("download", `westfield_newmarket_panel_vectors_${format}_${dateStr}_${timeStr}.csv`);
+    
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 }
 
 // Initial App Entry Point

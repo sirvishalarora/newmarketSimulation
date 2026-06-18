@@ -1178,3 +1178,242 @@ input[type="range"]::-webkit-slider-thumb:hover {
     background-color: var(--color-cyan) !important;
     box-shadow: 0 0 12px var(--color-cyan-glow) !important;
 }
+
+/* Panel Similarity Styles */
+.card-inner-header-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0px;
+    gap: 16px;
+}
+
+.result-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #64748b;
+    padding: 8px 0;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.result-tab:hover {
+    color: #ffffff;
+}
+
+.result-tab.active {
+    color: #a78bfa;
+    border-bottom-color: #8b5cf6;
+}
+
+.similarity-select {
+    background: rgba(17, 19, 35, 0.8);
+    border: 1px solid var(--border-color);
+    color: #ffffff;
+    border-radius: 6px;
+    outline: none;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.similarity-select option {
+    background-color: #1a1d36;
+    color: #ffffff;
+}
+
+.similarity-select:focus {
+    border-color: #8b5cf6;
+}
+
+.panel-card-select.reference-active {
+    border-color: #fbbf24 !important;
+    background: rgba(245, 158, 11, 0.08) !important;
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.15) !important;
+}
+
+.leaderboard-table tr.reference-active {
+    background: rgba(245, 158, 11, 0.08) !important;
+}
+
+.reference-panel-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+.ref-panel-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ref-panel-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #64748b;
+}
+
+.ref-panel-val {
+    font-weight: 600;
+    color: #fbbf24;
+}
+
+.btn-clear-ref {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    color: #64748b;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-clear-ref:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #fca5a5;
+}
+
+.detailed-comparison-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.comparison-selectors {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.comparison-selectors .similarity-select {
+    flex: 1;
+    font-size: 11px;
+}
+
+.vs-text {
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+}
+
+.comparison-results-container {
+    font-size: 11px;
+    color: #ffffff;
+}
+
+.no-selection-msg {
+    color: #64748b;
+    text-align: center;
+    padding: 10px 0;
+    font-style: italic;
+    font-size: 11px;
+}
+
+.comparison-metric-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px dotted rgba(255, 255, 255, 0.05);
+}
+
+.comparison-metric-row:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.comparison-metric-label {
+    color: #64748b;
+}
+
+.comparison-metric-val {
+    font-weight: 600;
+}
+
+.comparison-metric-val.highlight-purple {
+    color: #c084fc;
+}
+
+.overlap-bar-container {
+    margin-top: 8px;
+}
+
+.overlap-bar-title {
+    font-size: 9px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.overlap-bar-wrapper {
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.overlap-segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.overlap-segment.only-a {
+    background-color: #3b82f6;
+}
+
+.overlap-segment.shared {
+    background-color: #8b5cf6;
+}
+
+.overlap-segment.only-b {
+    background-color: #ec4899;
+}
+
+.overlap-bar-legend {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #64748b;
+    margin-top: 4px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.legend-color-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.legend-color-dot.only-a { background-color: #3b82f6; }
+.legend-color-dot.shared { background-color: #8b5cf6; }
+.legend-color-dot.only-b { background-color: #ec4899; }
+
+.vector-export-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+}
+
+
