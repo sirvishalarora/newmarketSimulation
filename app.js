@@ -12,11 +12,21 @@ let nodesMap = {};
 let adjacencyList = {};
 let distanceMatrix = {}; // sourceNodeId -> { targetNodeId: distance }
 let pathCache = {}; // sourceNodeId -> { targetNodeId: pathArray }
+let distToTarget = {}; // targetNodeId -> { anyNodeId: distance }
+let nodeInEscalatorZone = {}; // corridor nodes near escalator_lv2_4
 let panels = [];
+let panelsByFloor = { "1": [], "2": [], "3": [] };
+let cachedSpawnNodes = null;
+let cachedShopNodes = null;
+let categoryShopCounts = {};
 
 // Similarity State
 let selectedReferencePanel = null;
-let selectedSimilarityMetric = "jaccard";
+let selectedSimilarityMetric = "overlap_coef";
+
+// Weekly footfall model (Profile A — Westfield Newmarket)
+const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const DAILY_VISIT_WEIGHTS = [0.11, 0.12, 0.13, 0.145, 0.165, 0.195, 0.135];
 
 
 // Map Layer groups
@@ -28,13 +38,25 @@ let activeFloor = "1";
 let showGraph = false;
 
 // UI Configuration Parameters
-let totalAgentsToSimulate = 50000;
+let weeklyVisitsTotal = 200000;
+let weeklyUniquePool = 123000;
+let totalAgentsToSimulate = weeklyUniquePool; // denominator for reach / coverage metrics
 let minShopVisits = 2;
 let maxShopVisits = 4;
 let baseWalkSpeedMS = 1.3;
 let decayExponent = 1.3;
 let maxViewingDistance = 15.0;
 let viewingConeAngle = 60.0;
+
+// Segment-choice routing (alternative to shortest-path walking)
+let routingMode = "segment_logit"; // "shortest" | "segment_logit"
+let routeBetaProgress = 0.08;
+let routeRandomness = 1.0;
+let routeZoneBoost = 0.35;
+let routeBetaVertical = 0.5;
+const MAX_ROUTE_STEPS = 500;
+const PANEL_STEP_METERS = 2.0;
+const ESCALATOR_ZONE_RADIUS_M = 15.0;
 
 // let categoryWeights = {
 //     farmers: 0.9,
@@ -50,16 +72,16 @@ let viewingConeAngle = 60.0;
 // };
 
 let categoryWeights = {
-    farmers: 0.45,
-    davidjones: .16,
-    hm: 0.26,
+    farmers: 0.60,
+    davidjones: 0.45,
+    hm: 0.35,
     woolworths: 0.70,
     jbhifi: 0.30,
-    foodcourt: 0.78,
-    noelleeming: 0.4,
+    foodcourt: 0.75,
+    noelleeming: 0.30,
     archiebrothers: 0.35,
-    rebelsport: 0.4,
-    specialty: 0.5
+    rebelsport: 0.35,
+    specialty: 0.12
 };
 
 
@@ -89,6 +111,99 @@ let floorCrossingsChart = null;
 
 // Search & Filter Setup Screen
 let currentSearchQuery = "";
+
+// Helper: parse agent/person index from ID string
+function parsePersonIndex(agentId) {
+    if (typeof agentId === "string") {
+        const match = agentId.match(/(?:agent_|person_)(\d+)/);
+        if (match) return parseInt(match[1], 10);
+    }
+    const n = parseInt(agentId, 10);
+    return isNaN(n) ? null : n;
+}
+
+function resetPanelStats() {
+    panels.forEach(p => {
+        p.crossedAgents.clear();
+        p.contactCount = 0;
+    });
+}
+
+function getDailyTripCounts() {
+    const counts = DAILY_VISIT_WEIGHTS.map(w => Math.round(weeklyVisitsTotal * w));
+    counts[5] += weeklyVisitsTotal - counts.reduce((a, b) => a + b, 0);
+    return counts;
+}
+
+/** One guaranteed trip per pool member, then random fill — matches run_batch_simulation.build_trip_plan. */
+function buildWeeklyTripAssignments(totalTrips, poolSize) {
+    if (totalTrips <= 0) return [];
+    if (totalTrips >= poolSize) {
+        const assignments = [];
+        for (let i = 1; i <= poolSize; i++) assignments.push(i);
+        for (let i = 0; i < totalTrips - poolSize; i++) {
+            assignments.push(1 + Math.floor(Math.random() * poolSize));
+        }
+        for (let i = assignments.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [assignments[i], assignments[j]] = [assignments[j], assignments[i]];
+        }
+        return assignments;
+    }
+    const people = Array.from({ length: poolSize }, (_, i) => i + 1);
+    for (let i = people.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [people[i], people[j]] = [people[j], people[i]];
+    }
+    return people.slice(0, totalTrips);
+}
+
+function getDayIndexForTrip(tripIndex, dailyCounts) {
+    let rem = tripIndex;
+    for (let d = 0; d < dailyCounts.length; d++) {
+        if (rem < dailyCounts[d]) return d;
+        rem -= dailyCounts[d];
+    }
+    return dailyCounts.length - 1;
+}
+
+function ensureCachedNodes() {
+    if (!cachedSpawnNodes) {
+        cachedSpawnNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
+        cachedShopNodes = Object.values(nodesMap).filter(n => n.type === "shop_entry");
+        rebuildCategoryShopCounts();
+    }
+}
+
+function invalidateNodeCache() {
+    cachedSpawnNodes = null;
+    cachedShopNodes = null;
+    categoryShopCounts = {};
+}
+
+function rebuildCategoryShopCounts() {
+    categoryShopCounts = {};
+    if (!cachedShopNodes) return;
+    cachedShopNodes.forEach(node => {
+        const cat = getStoreCategory(node.name);
+        categoryShopCounts[cat] = (categoryShopCounts[cat] || 0) + 1;
+    });
+}
+
+function rebuildPanelsByFloor() {
+    panelsByFloor = { "1": [], "2": [], "3": [] };
+    panels.forEach(p => {
+        if (panelsByFloor[p.floor]) panelsByFloor[p.floor].push(p);
+    });
+}
+
+function updateDailyWeightsPreview() {
+    const el = document.getElementById("daily-weights-preview");
+    if (!el) return;
+    const counts = getDailyTripCounts();
+    const parts = DAY_NAMES.map((name, i) => `${name.slice(0, 3)} ${(DAILY_VISIT_WEIGHTS[i] * 100).toFixed(1)}% (${counts[i].toLocaleString()})`);
+    el.textContent = `Profile A: ${parts.join(" · ")}`;
+}
 
 // Helper: Distance in meters
 function distanceM(p1, p2) {
@@ -121,14 +236,14 @@ class PriorityQueue {
 function parseCSV(text) {
     const lines = text.split("\n");
     if (lines.length === 0) return [];
-    
+
     const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ''));
     const result = [];
-    
+
     for (let i = 1; i < lines.length; i++) {
         const line = lines[i].trim();
         if (!line) continue;
-        
+
         const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ''));
         const obj = {};
         for (let j = 0; j < headers.length; j++) {
@@ -154,12 +269,12 @@ function initMap() {
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         maxZoom: 20
     }).addTo(map);
-    
+
     // Add default layers to map
     floorLayers["1"].addTo(map);
     panelLayer.addTo(map);
     coneLayer.addTo(map);
-    
+
     // Ensure Leaflet layout updates sizes correctly
     setTimeout(() => {
         map.invalidateSize();
@@ -179,7 +294,7 @@ function loadGeoJSON() {
         .then(data => {
             geojsonData = data;
             console.log(`Loaded GeoJSON topology. Total features: ${data.features ? data.features.length : 0}`);
-            
+
             L.geoJSON(geojsonData, {
                 pointToLayer: function(feature, latlng) {
                     // Render Point features (entrances/exits) as small circle markers to bypass CDN marker image loading issues
@@ -197,7 +312,7 @@ function loadGeoJSON() {
                 style: function(feature) {
                     const props = feature.properties || {};
                     const indoor = props.indoor;
-                    
+
                     if (indoor === "corridor") {
                         return {
                             fillColor: '#334155', // slate-700 for distinct contrast
@@ -240,7 +355,7 @@ function loadGeoJSON() {
                 onEachFeature: function(feature, layer) {
                     const props = feature.properties || {};
                     const level = props.level || "1";
-                    
+
                     // Bind tooltips for shop names
                     if (props.name && props.indoor === "room") {
                         let dispName = props.name.replace(/_lv[1-3].*/, '').replace(/_/g, ' ');
@@ -251,14 +366,14 @@ function loadGeoJSON() {
                             className: 'shop-label-tooltip'
                         });
                     }
-                    
+
                     // Put in correct floor layer group
                     if (floorLayers[level]) {
                         floorLayers[level].addLayer(layer);
                     }
                 }
             });
-            
+
             // Zoom to fit bounds
             const bounds = floorLayers["1"].getBounds();
             if (bounds.isValid()) {
@@ -284,25 +399,27 @@ function loadGraph() {
         .then(data => {
             graphData = data;
             console.log(`Loaded network graph. Nodes: ${data.nodes.length}, Edges: ${data.edges.length}`);
-            
+
             // Build Nodes Map and Adjacency list
             graphData.nodes.forEach(node => {
                 nodesMap[node.id] = node;
                 adjacencyList[node.id] = [];
             });
-            
+
             graphData.edges.forEach(edge => {
                 const s = edge.source;
                 const t = edge.target;
                 const w = edge.weight;
-                
+
                 if (adjacencyList[s] && adjacencyList[t]) {
                     adjacencyList[s].push({ target: t, weight: w });
                     adjacencyList[t].push({ target: s, weight: w });
                 }
             });
-            
+
             renderGraphOverlay();
+            buildEscalatorZoneFlags();
+            invalidateNodeCache();
         })
         .catch(err => {
             console.error("Error loading network graph:", err);
@@ -315,21 +432,21 @@ function renderGraphOverlay() {
     if (typeof L === 'undefined' || !map) return;
     graphLayer.clearLayers();
     if (!graphData) return;
-    
+
     graphData.edges.forEach(edge => {
         const sNode = nodesMap[edge.source];
         const tNode = nodesMap[edge.target];
         if (!sNode || !tNode) return;
-        
+
         const isTransit = sNode.level !== tNode.level;
         const matchesLevel = sNode.level === activeFloor || tNode.level === activeFloor;
-        
+
         if (matchesLevel) {
             const color = isTransit ? '#c084fc' : '#8b5cf6';
             const weight = isTransit ? 1.5 : 0.8;
             const dashArray = isTransit ? '3, 5' : '1';
             const opacity = isTransit ? 0.5 : 0.12;
-            
+
             const line = L.polyline(
                 [[sNode.y, sNode.x], [tNode.y, tNode.x]],
                 { color: color, weight: weight, opacity: opacity, dashArray: dashArray }
@@ -337,7 +454,7 @@ function renderGraphOverlay() {
             graphLayer.addLayer(line);
         }
     });
-    
+
     if (showGraph) {
         if (!map.hasLayer(graphLayer)) map.addLayer(graphLayer);
     } else {
@@ -365,8 +482,10 @@ function loadPanels() {
                 floor: row.floor.trim(),
                 orientation: parseFloat(row.orientation),
                 crossedAgents: new Set(),
+                contactCount: 0,
                 marker: null
             }));
+            rebuildPanelsByFloor();
             console.log(`Loaded ${panels.length} panels from CSV.`);
             renderPanelsSelectionGrid();
             renderPanelMarkers();
@@ -383,26 +502,29 @@ function loadPanels() {
 function renderPanelMarkers() {
     if (typeof L === 'undefined' || !map) return;
     panelLayer.clearLayers();
-    
+
     panels.forEach(panel => {
         // Check checkbox state (setup selection or results screen selection)
         const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? document.getElementById(`chk-${panel.id}`)?.checked ?? true;
-        
+
         // Custom HTML Icon
         const customIcon = L.divIcon({
             html: `<div class="panel-marker-inner ${isChecked ? '' : 'inactive-marker'}" id="marker-inner-${panel.id}"></div>`,
             className: 'panel-map-marker',
             iconSize: [16, 16]
         });
-        
+
         const marker = L.marker([panel.lat, panel.lon], { icon: customIcon });
-        
+
         // Tooltip text
         let tooltipContent = `<b>${panel.name}</b><br>Floor: L${panel.floor}<br>Orient: ${panel.orientation}°`;
         if (panel.crossedAgents.size > 0) {
-            tooltipContent += `<br>Unique Crossed: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
+            tooltipContent += `<br>Unique Reach: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
+            if (panel.contactCount > 0) {
+                tooltipContent += `<br>Contacts: <b>${panel.contactCount.toLocaleString()}</b>`;
+            }
         }
-        
+
         // If a reference panel is selected, append similarity details to tooltip
         if (selectedReferencePanel) {
             if (panel.id === selectedReferencePanel.id) {
@@ -414,29 +536,31 @@ function renderPanelMarkers() {
                     formattedScore = `${(score * 100).toFixed(1)}% (Jaccard)`;
                 } else if (selectedSimilarityMetric === "cosine") {
                     formattedScore = `${(score * 100).toFixed(1)}% (Cosine)`;
+                } else if (selectedSimilarityMetric === "overlap_coef") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Overlap Coef)`;
                 } else {
                     formattedScore = `${score.toLocaleString()} agents (Overlap)`;
                 }
                 tooltipContent += `<br><span style="color: #c084fc; font-weight: 600;">Similarity: ${formattedScore}</span>`;
             }
         }
-        
+
         marker.bindTooltip(tooltipContent, { direction: 'top' });
-        
+
         // Map click selecting reference
         marker.on('click', () => {
             selectReferencePanel(panel.id);
         });
-        
+
         // Keep similarity colors updated when marker is re-added
         marker.on('add', () => {
             setTimeout(() => {
                 updateMapSimilarityColoring();
             }, 0);
         });
-        
+
         panel.marker = marker;
-        
+
         // Show marker only if on active floor
         if (panel.floor === activeFloor) {
             panelLayer.addLayer(marker);
@@ -448,23 +572,23 @@ function renderPanelMarkers() {
 function renderPanelCones() {
     if (typeof L === 'undefined' || !map) return;
     coneLayer.clearLayers();
-    
+
     panels.forEach(panel => {
         if (panel.floor !== activeFloor) return;
-        
+
         const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? document.getElementById(`chk-${panel.id}`)?.checked ?? true;
         if (!isChecked) return; // Hide cone if panel is unselected
-        
+
         const centerLat = panel.lat;
         const centerLon = panel.lon;
         const orient = panel.orientation;
-        
+
         // Generate wedge vertices starting with center point
         const points = [[centerLat, centerLon]];
-        
+
         const startAngle = orient - viewingConeAngle;
         const endAngle = orient + viewingConeAngle;
-        
+
         // Sample every 5 degrees for a smooth arc
         for (let a = startAngle; a <= endAngle; a += 5) {
             const aRad = (a * Math.PI) / 180.0;
@@ -472,15 +596,15 @@ function renderPanelCones() {
             const lonOffset = (maxViewingDistance * Math.sin(aRad)) / LON_DEG_TO_M;
             points.push([centerLat + latOffset, centerLon + lonOffset]);
         }
-        
+
         // Close the wedge polygon
         points.push([centerLat, centerLon]);
-        
+
         // Determine color based on similarity if a reference panel is selected
         let coneColor = '#ec4899'; // default pink
         let coneFillOpacity = 0.08;
         let coneColorBorder = 'rgba(236, 72, 153, 0.35)';
-        
+
         if (selectedReferencePanel) {
             if (panel.id === selectedReferencePanel.id) {
                 coneColor = '#fbbf24'; // gold
@@ -489,7 +613,7 @@ function renderPanelCones() {
             } else {
                 const score = getPanelSimilarity(selectedReferencePanel, panel, selectedSimilarityMetric);
                 const normalized = normalizeScore(score, selectedSimilarityMetric, selectedReferencePanel);
-                
+
                 if (normalized > 0.0001) {
                     const rgb = getSimilarityColor(normalized);
                     coneColor = rgb;
@@ -502,7 +626,7 @@ function renderPanelCones() {
                 }
             }
         }
-        
+
         const wedge = L.polygon(points, {
             color: coneColorBorder,
             weight: 1,
@@ -510,7 +634,7 @@ function renderPanelCones() {
             fillOpacity: coneFillOpacity,
             interactive: false
         });
-        
+
         coneLayer.addLayer(wedge);
     });
 }
@@ -527,21 +651,21 @@ function dijkstraAll(startNodeId) {
     const dist = {};
     const prev = {};
     const queue = new PriorityQueue();
-    
+
     for (const nodeId in nodesMap) {
         dist[nodeId] = Infinity;
         prev[nodeId] = null;
     }
     dist[startNodeId] = 0;
     queue.enqueue(startNodeId, 0);
-    
+
     while (!queue.isEmpty()) {
         const u = queue.dequeue();
         const uDist = dist[u];
-        
+
         const neighbors = adjacencyList[u];
         if (!neighbors) continue;
-        
+
         for (const edge of neighbors) {
             const v = edge.target;
             const alt = uDist + edge.weight;
@@ -552,7 +676,7 @@ function dijkstraAll(startNodeId) {
             }
         }
     }
-    
+
     // Reconstruct paths for all nodes
     const paths = {};
     for (const targetNodeId in nodesMap) {
@@ -566,27 +690,88 @@ function dijkstraAll(startNodeId) {
         }
         paths[targetNodeId] = path;
     }
-    
+
     return { distances: dist, paths: paths };
+}
+
+// Corridor nodes within radius of escalator_lv2_4 (L2 branch panel zone)
+function buildEscalatorZoneFlags() {
+    nodeInEscalatorZone = {};
+    const anchor = Object.values(nodesMap).find(n => n.name === "escalator_lv2_4");
+    if (!anchor) return;
+
+    Object.values(nodesMap).forEach(node => {
+        if (node.type !== "corridor" || node.level !== "2") return;
+        const dx = (node.x - anchor.x) * LON_DEG_TO_M;
+        const dy = (node.y - anchor.y) * LAT_DEG_TO_M;
+        if (Math.hypot(dx, dy) <= ESCALATOR_ZONE_RADIUS_M) {
+            nodeInEscalatorZone[node.id] = true;
+        }
+    });
 }
 
 // Precompute paths and distances between all entrance & shop decision nodes
 function precomputePaths() {
     const decisionNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance" || n.type === "shop_entry");
-    
+
     decisionNodes.forEach(node => {
         const result = dijkstraAll(node.id);
         distanceMatrix[node.id] = result.distances;
         pathCache[node.id] = result.paths;
+        distToTarget[node.id] = result.distances;
     });
     console.log(`Precomputed shortest paths for ${decisionNodes.length} source nodes.`);
+}
+
+function gumbelNoise() {
+    return -Math.log(-Math.log(Math.random()));
+}
+
+function verticalRouteHint(nodeId, targetId) {
+    const node = nodesMap[nodeId];
+    const target = nodesMap[targetId];
+    if (!node || !target || node.level === target.level) return 0;
+    if (node.type === "escalator" || node.type === "elevator") return 1;
+    return 0;
+}
+
+function chooseNextNode(currentId, prevId, targetId) {
+    const distMap = distToTarget[targetId];
+    if (!distMap) return null;
+
+    const neighbors = adjacencyList[currentId] || [];
+    const candidates = neighbors
+        .map(e => e.target)
+        .filter(v => v !== prevId && distMap[v] !== undefined && distMap[v] < Infinity);
+
+    if (candidates.length === 0) {
+        return prevId || null;
+    }
+
+    let total = 0;
+    const weighted = candidates.map(v => {
+        const progress = distMap[currentId] - distMap[v];
+        let score = routeBetaProgress * progress;
+        if (nodeInEscalatorZone[v]) score += routeZoneBoost;
+        score += routeBetaVertical * verticalRouteHint(v, targetId);
+        const w = Math.exp(score + routeRandomness * gumbelNoise());
+        total += w;
+        return { v, w };
+    });
+
+    let r = Math.random() * total;
+    for (const { v, w } of weighted) {
+        r -= w;
+        if (r <= 0) return v;
+    }
+    return weighted[weighted.length - 1].v;
 }
 
 // Get store category helper
 function getStoreCategory(name) {
     if (!name) return "specialty";
     const nameLower = name.toLowerCase();
-    
+
     if (nameLower.includes("farmers")) return "farmers";
     if (nameLower.includes("davidjones") || nameLower.includes("david jones")) return "davidjones";
     if (nameLower.includes("handm") || nameLower.includes("h&m") || nameLower.includes("hm")) return "hm";
@@ -594,205 +779,204 @@ function getStoreCategory(name) {
     if (nameLower.includes("jbhifi") || nameLower.includes("jb hifi") || nameLower.includes("jb hi-fi") || nameLower.includes("jb_hifi")) return "jbhifi";
     if (nameLower.includes("food_court") || nameLower.includes("foodcourt")) return "foodcourt";
     if (nameLower.includes("noelleeming") || nameLower.includes("noel leeming") || nameLower.includes("noel_leeming")) return "noelleeming";
-    if (nameLower.includes("archiebrothers") || nameLower.includes("archie brothers") || nameLower.includes("archie_brothers")) return "archiebrothers";
-    if (nameLower.includes("rebelsport") || nameLower.includes("rebel sport") || nameLower.includes("rebel_sport")) return "rebelsport";
-    
+    if (nameLower.includes("archiebrothers") || nameLower.includes("archie brothers") || nameLower.includes("archie_brothers") || nameLower.includes("archiebros")) return "archiebrothers";
+    if (nameLower.includes("rebelsport") || nameLower.includes("rebel sport") || nameLower.includes("rebel_sport") || nameLower.startsWith("rs_")) return "rebelsport";
+
     return "specialty";
 }
 
 // Select target destination shop based on Huff's Gravity Model using precomputed graph distance
 function selectNextShopGravity(currentNodeId, lastVisitedShopId) {
-    const shopNodes = Object.values(nodesMap).filter(n => n.type === "shop_entry");
+    ensureCachedNodes();
+    const shopNodes = cachedShopNodes;
     if (shopNodes.length === 0) return null;
-    
+
     const candidates = [];
     let totalWeight = 0;
-    
+
     shopNodes.forEach(node => {
         if (node.id === lastVisitedShopId) return;
-        
+
         const cat = getStoreCategory(node.name);
-        let baseWt = categoryWeights[cat] || 0.3;
-        baseWt = Math.max(0.001, baseWt); 
-        
+        const shopsInCategory = categoryShopCounts[cat] || 1;
+        // Category slider = total pull for that store type; split evenly across its shop nodes.
+        let baseWt = (categoryWeights[cat] || 0.3) / shopsInCategory;
+        baseWt = Math.max(0.001, baseWt);
+
         let dist = distanceMatrix[currentNodeId][node.id];
-        
+
         if (dist === undefined || dist === Infinity) {
             return;
         }
-        
+
         const distFactor = Math.max(2.0, dist);
         const wt = baseWt / Math.pow(distFactor, decayExponent);
-        
+
         candidates.push({ node, weight: wt });
         totalWeight += wt;
     });
-    
+
     if (totalWeight === 0) return shopNodes[Math.floor(Math.random() * shopNodes.length)];
-    
+
     let r = Math.random() * totalWeight;
     for (const cand of candidates) {
         r -= cand.weight;
         if (r <= 0) return cand.node;
     }
-    
+
     return candidates[candidates.length - 1].node;
 }
 
-// Check if agent crosses a panel at (x, y) along a segment
-function checkPanelCrossing(x, y, floor, n1, n2, agentId, activePanelIds) {
-    const sameFloorPanels = panels.filter(p => p.floor === floor);
-    
+// Test whether agent at (x,y) is inside a panel's viewing corridor
+function isAgentInPanelView(x, y, floor, n1, n2, panel) {
+    if (panel.floor !== floor) return false;
+
+    const dx = (x - panel.lon) * LON_DEG_TO_M;
+    const dy = (y - panel.lat) * LAT_DEG_TO_M;
+    const dist = Math.hypot(dx, dy);
+    if (dist > maxViewingDistance) return false;
+
+    const thetaRad = (panel.orientation * Math.PI) / 180.0;
+    const panelNormalX = Math.sin(thetaRad);
+    const panelNormalY = Math.cos(thetaRad);
+    const p2aX = dx / dist;
+    const p2aY = dy / dist;
+    const dotProductPosition = p2aX * panelNormalX + p2aY * panelNormalY;
+    const cosCone = Math.cos((viewingConeAngle * Math.PI) / 180.0);
+    if (dotProductPosition < cosCone) return false;
+
+    const hx = (n2.x - n1.x) * LON_DEG_TO_M;
+    const hy = (n2.y - n1.y) * LAT_DEG_TO_M;
+    const headingDist = Math.hypot(hx, hy);
+    if (headingDist > 0.0001) {
+        const headingX = hx / headingDist;
+        const headingY = hy / headingDist;
+        const dotProductHeading = headingX * (-p2aX) + headingY * (-p2aY);
+        if (dotProductHeading < cosCone) return false;
+    }
+    return true;
+}
+
+// Passage-based panel detection: one contact per corridor entry (not per meter)
+function checkPanelCrossing(x, y, floor, n1, n2, agentId, activePanelIds, passageState) {
+    const sameFloorPanels = panelsByFloor[floor] || [];
+
     sameFloorPanels.forEach(panel => {
         if (!activePanelIds.has(panel.id)) return;
-        if (panel.crossedAgents.has(agentId)) return;
-        
-        // 1. Distance check
-        const dx = (x - panel.lon) * LON_DEG_TO_M;
-        const dy = (y - panel.lat) * LAT_DEG_TO_M;
-        const dist = Math.hypot(dx, dy);
-        
-        if (dist > maxViewingDistance) return; 
-        
-        // 2. Position angle check
-        const thetaRad = (panel.orientation * Math.PI) / 180.0;
-        const panelNormalX = Math.sin(thetaRad);
-        const panelNormalY = Math.cos(thetaRad);
-        
-        const p2aX = dx / dist;
-        const p2aY = dy / dist;
-        
-        const dotProductPosition = p2aX * panelNormalX + p2aY * panelNormalY;
-        const cosCone = Math.cos((viewingConeAngle * Math.PI) / 180.0);
-        
-        if (dotProductPosition < cosCone) return; 
-        
-        // 3. Heading check
-        const hx = (n2.x - n1.x) * LON_DEG_TO_M;
-        const hy = (n2.y - n1.y) * LAT_DEG_TO_M;
-        const headingDist = Math.hypot(hx, hy);
-        
-        if (headingDist > 0.0001) { 
-            const headingX = hx / headingDist;
-            const headingY = hy / headingDist;
-            
-            const a2pX = -p2aX;
-            const a2pY = -p2aY;
-            
-            const dotProductHeading = headingX * a2pX + headingY * a2pY;
-            if (dotProductHeading < cosCone) return; 
+
+        const inView = isAgentInPanelView(x, y, floor, n1, n2, panel);
+        let inViewSet = passageState.get(agentId);
+        if (!inViewSet) {
+            inViewSet = new Set();
+            passageState.set(agentId, inViewSet);
         }
-        
-        // Detected! Register crossing
-        panel.crossedAgents.add(agentId);
-        floorDetections[floor].add(agentId);
+        const wasInView = inViewSet.has(panel.id);
+
+        if (inView && !wasInView) {
+            panel.contactCount++;
+            panel.crossedAgents.add(agentId);
+            floorDetections[floor].add(agentId);
+            inViewSet.add(panel.id);
+        } else if (!inView && wasInView) {
+            inViewSet.delete(panel.id);
+        }
     });
 }
 
-// Simulate a single agent from start to exit
-function simulateAgent(agentIndex, activePanelIds) {
-    const agentId = `agent_${agentIndex}`;
-    
-    // Spawn
-    const spawnNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
-    const startNode = spawnNodes[Math.floor(Math.random() * spawnNodes.length)];
-    
+function walkSingleEdge(n1, n2, agentId, activePanelIds, passageState, stats) {
+    const segmentDist = distanceM([n1.x, n1.y], [n2.x, n2.y]);
+    stats.totalDistTraveled += segmentDist;
+
+    const numSteps = Math.max(1, Math.floor(segmentDist / PANEL_STEP_METERS));
+    for (let s = 0; s <= numSteps; s++) {
+        const t = s / numSteps;
+        const x = n1.x + t * (n2.x - n1.x);
+        const y = n1.y + t * (n2.y - n1.y);
+        checkPanelCrossing(x, y, n1.level, n1, n2, agentId, activePanelIds, passageState);
+    }
+}
+
+function walkPathSegments(path, agentId, activePanelIds, passageState, stats) {
+    for (let i = 0; i < path.length - 1; i++) {
+        walkSingleEdge(nodesMap[path[i]], nodesMap[path[i + 1]], agentId, activePanelIds, passageState, stats);
+    }
+}
+
+function walkSegmentChoice(startId, targetId, agentId, activePanelIds, passageState, stats) {
+    if (startId === targetId) return;
+
+    let currentId = startId;
+    let prevId = null;
+    for (let step = 0; step < MAX_ROUTE_STEPS && currentId !== targetId; step++) {
+        const nextId = chooseNextNode(currentId, prevId, targetId);
+        if (!nextId || nextId === currentId) break;
+
+        walkSingleEdge(nodesMap[currentId], nodesMap[nextId], agentId, activePanelIds, passageState, stats);
+        prevId = currentId;
+        currentId = nextId;
+    }
+}
+
+function walkRoute(startId, targetId, agentId, activePanelIds, passageState, stats) {
+    if (routingMode === "segment_logit") {
+        walkSegmentChoice(startId, targetId, agentId, activePanelIds, passageState, stats);
+        return;
+    }
+
+    const path = pathCache[startId]?.[targetId];
+    if (path && path.length > 1) {
+        walkPathSegments(path, agentId, activePanelIds, passageState, stats);
+    }
+}
+
+// Simulate a single mall trip for one person
+function simulateAgent(personId, activePanelIds) {
+    ensureCachedNodes();
+    const passageState = new Map();
+
+    const startNode = cachedSpawnNodes[Math.floor(Math.random() * cachedSpawnNodes.length)];
     let currentNodeId = startNode.id;
     let lastVisitedShopId = null;
-    
+
     const visitsCount = minShopVisits + Math.floor(Math.random() * (maxShopVisits - minShopVisits + 1));
-    let totalDistTraveled = 0;
-    
-    // Visits
+    const stats = { totalDistTraveled: 0 };
+
     for (let v = 0; v < visitsCount; v++) {
         const targetShop = selectNextShopGravity(currentNodeId, lastVisitedShopId);
         if (!targetShop) break;
-        
-        const path = pathCache[currentNodeId][targetShop.id];
-        if (!path || path.length <= 1) {
-            currentNodeId = targetShop.id;
+
+        if (currentNodeId === targetShop.id) {
             lastVisitedShopId = targetShop.id;
             continue;
         }
-        
-        const cat = getStoreCategory(targetShop.name);
-        shopCategoryVisits[cat]++;
-        
-        for (let i = 0; i < path.length - 1; i++) {
-            const uId = path[i];
-            const vId = path[i + 1];
-            const n1 = nodesMap[uId];
-            const n2 = nodesMap[vId];
-            
-            const segmentDist = distanceM([n1.x, n1.y], [n2.x, n2.y]);
-            totalDistTraveled += segmentDist;
-            
-            const stepMeters = 1.0;
-            const numSteps = Math.max(1, Math.floor(segmentDist / stepMeters));
-            
-            for (let s = 0; s <= numSteps; s++) {
-                const t = s / numSteps;
-                const x = n1.x + t * (n2.x - n1.x);
-                const y = n1.y + t * (n2.y - n1.y);
-                
-                checkPanelCrossing(x, y, n1.level, n1, n2, agentId, activePanelIds);
-            }
-        }
-        
+
+        shopCategoryVisits[getStoreCategory(targetShop.name)]++;
+        walkRoute(currentNodeId, targetShop.id, personId, activePanelIds, passageState, stats);
         currentNodeId = targetShop.id;
         lastVisitedShopId = targetShop.id;
     }
-    
-    // Exit
-    const exitNodes = Object.values(nodesMap).filter(n => n.type === "mall_entrance");
-    const exitNode = exitNodes[Math.floor(Math.random() * exitNodes.length)];
-    
-    const pathExit = pathCache[currentNodeId][exitNode.id];
-    if (pathExit && pathExit.length > 1) {
-        for (let i = 0; i < pathExit.length - 1; i++) {
-            const uId = pathExit[i];
-            const vId = pathExit[i + 1];
-            const n1 = nodesMap[uId];
-            const n2 = nodesMap[vId];
-            
-            const segmentDist = distanceM([n1.x, n1.y], [n2.x, n2.y]);
-            totalDistTraveled += segmentDist;
-            
-            const stepMeters = 1.0;
-            const numSteps = Math.max(1, Math.floor(segmentDist / stepMeters));
-            
-            for (let s = 0; s <= numSteps; s++) {
-                const t = s / numSteps;
-                const x = n1.x + t * (n2.x - n1.x);
-                const y = n1.y + t * (n2.y - n1.y);
-                
-                checkPanelCrossing(x, y, n1.level, n1, n2, agentId, activePanelIds);
-            }
-        }
-    }
-    
-    return {
-        id: agentId,
-        distance: totalDistTraveled,
-        visits: visitsCount
-    };
+
+    const exitNode = cachedSpawnNodes[Math.floor(Math.random() * cachedSpawnNodes.length)];
+    walkRoute(currentNodeId, exitNode.id, personId, activePanelIds, passageState, stats);
+
+    return { id: personId, distance: stats.totalDistTraveled, visits: visitsCount };
 }
 
 // Execute the simulation using frame-by-frame batching
 function runSimulation() {
     readUIParameters();
-    
+
     setUIControlsState(true);
-    
+
     // Switch Inner Cards visible layout
     document.getElementById("state-setup-stats").style.display = "none";
     document.getElementById("state-setup-list").style.display = "none";
     document.getElementById("state-results-summary").style.display = "none";
     document.getElementById("state-results-details").style.display = "none";
     document.getElementById("state-running").style.display = "flex";
-    
+
     // Reset stats
-    panels.forEach(p => p.crossedAgents.clear());
+    resetPanelStats();
     simulatedAgentsData = [];
     for (const cat in shopCategoryVisits) {
         shopCategoryVisits[cat] = 0;
@@ -800,7 +984,7 @@ function runSimulation() {
     floorDetections["1"].clear();
     floorDetections["2"].clear();
     floorDetections["3"].clear();
-    
+
     // Build active panels set
     const activePanelIds = new Set();
     panels.forEach(p => {
@@ -809,91 +993,106 @@ function runSimulation() {
             activePanelIds.add(p.id);
         }
     });
-    
-    let currentAgentCount = 0;
-    const batchSize = 1500; 
+
+    const dailyCounts = getDailyTripCounts();
+    const totalTripsToSimulate = dailyCounts.reduce((a, b) => a + b, 0);
+    const tripPersonAssignments = buildWeeklyTripAssignments(totalTripsToSimulate, weeklyUniquePool);
+    let currentTripCount = 0;
+    const batchSize = 1500;
     const startTime = performance.now();
-    
+
     const circle = document.getElementById("running-progress-circle");
     const radius = circle.r.baseVal.value;
     const circumference = radius * 2 * Math.PI;
     circle.style.strokeDasharray = `${circumference} ${circumference}`;
-    
+
     function setProgress(percent) {
         const offset = circumference - (percent / 100) * circumference;
         circle.style.strokeDashoffset = offset;
         document.getElementById("running-progress-percent").textContent = `${Math.round(percent)}%`;
     }
-    
+
     document.getElementById("running-status-text").textContent = "Preparing pedestrian graphs...";
     setProgress(0);
-    
+
     setTimeout(() => {
         if (Object.keys(distanceMatrix).length === 0) {
             precomputePaths();
         }
-        
-        document.getElementById("running-status-text").textContent = "Simulating gravity choices...";
-        
+
+        document.getElementById("running-status-text").textContent = "Simulating 7-day weighted footfall...";
+
         function processBatch() {
-            const startBatchIndex = currentAgentCount;
-            const endBatchIndex = Math.min(totalAgentsToSimulate, startBatchIndex + batchSize);
-            
-            for (let i = startBatchIndex; i < endBatchIndex; i++) {
-                const data = simulateAgent(i + 1, activePanelIds);
-                simulatedAgentsData.push(data);
+            const startBatchIndex = currentTripCount;
+            const endBatchIndex = Math.min(totalTripsToSimulate, startBatchIndex + batchSize);
+
+            for (let tripIndex = startBatchIndex; tripIndex < endBatchIndex; tripIndex++) {
+                const dayIndex = getDayIndexForTrip(tripIndex, dailyCounts);
+                const personNum = tripPersonAssignments[tripIndex];
+                simulateAgent(`person_${personNum}`, activePanelIds);
             }
-            
-            currentAgentCount = endBatchIndex;
-            const percent = (currentAgentCount / totalAgentsToSimulate) * 100;
+
+            currentTripCount = endBatchIndex;
+            const percent = (currentTripCount / totalTripsToSimulate) * 100;
             setProgress(percent);
-            document.getElementById("running-substats").textContent = `Simulated: ${currentAgentCount.toLocaleString()} / ${totalAgentsToSimulate.toLocaleString()}`;
-            
-            if (currentAgentCount < totalAgentsToSimulate) {
+            const dayIndex = getDayIndexForTrip(Math.min(currentTripCount, totalTripsToSimulate - 1), dailyCounts);
+            document.getElementById("running-substats").textContent =
+                `Trips: ${currentTripCount.toLocaleString()} / ${totalTripsToSimulate.toLocaleString()} · ${DAY_NAMES[dayIndex]}`;
+
+            if (currentTripCount < totalTripsToSimulate) {
                 requestAnimationFrame(processBatch);
             } else {
                 // Completed!
                 const endTime = performance.now();
                 const elapsedTimeMs = Math.round(endTime - startTime);
-                
+
                 // Show completed state cards
                 document.getElementById("state-running").style.display = "none";
                 document.getElementById("state-results-summary").style.display = "flex";
                 document.getElementById("state-results-details").style.display = "block";
-                
+
                 // Populate stats
                 renderResultsMetrics(elapsedTimeMs);
                 renderCharts();
                 renderLeaderboardTable();
-                
+
                 // Populate dropdown lists and refresh similarity values
                 populateComparisonDropdowns();
                 updateDetailedComparison();
                 updateReferencePanelUI();
-                
+
                 // Refresh Map Visual overlays with counts in tooltips
                 updatePanelMapVisuals();
-                
+
                 // Re-enable inputs
                 setUIControlsState(false);
                 document.getElementById("btn-reset").removeAttribute("disabled");
             }
         }
-        
+
         requestAnimationFrame(processBatch);
     }, 100);
 }
 
 // Read parameters from sliders/inputs
 function readUIParameters() {
-    totalAgentsToSimulate = parseInt(document.getElementById("input-total-agents").value);
+    weeklyVisitsTotal = parseInt(document.getElementById("input-weekly-visits").value);
+    weeklyUniquePool = parseInt(document.getElementById("input-weekly-uniques").value);
+    totalAgentsToSimulate = weeklyUniquePool;
+    updateDailyWeightsPreview();
     minShopVisits = parseInt(document.getElementById("input-min-visits").value);
     maxShopVisits = parseInt(document.getElementById("input-max-visits").value);
     baseWalkSpeedMS = parseFloat(document.getElementById("input-walk-speed").value);
     decayExponent = parseFloat(document.getElementById("input-decay-exponent").value);
     maxViewingDistance = parseFloat(document.getElementById("input-view-dist").value);
     viewingConeAngle = parseFloat(document.getElementById("input-cone-angle").value);
-    
+
+    routingMode = document.getElementById("input-routing-mode").value;
+    routeBetaProgress = parseFloat(document.getElementById("input-route-beta").value);
+    routeRandomness = parseFloat(document.getElementById("input-route-randomness").value);
+    routeZoneBoost = parseFloat(document.getElementById("input-route-zone-boost").value);
+    routeBetaVertical = parseFloat(document.getElementById("input-route-vertical").value);
+
     // Attractiveness weights
     categoryWeights.farmers = parseInt(document.getElementById("wt-farmers").value) / 100.0;
     categoryWeights.davidjones = parseInt(document.getElementById("wt-davidjones").value) / 100.0;
@@ -911,7 +1110,7 @@ function readUIParameters() {
 function setUIControlsState(disabled) {
     const inputs = document.querySelectorAll(".sidebar input, .sidebar button");
     inputs.forEach(el => {
-        if (el.id === "btn-reset") return; 
+        if (el.id === "btn-reset") return;
         if (disabled) {
             el.setAttribute("disabled", "true");
         } else {
@@ -922,20 +1121,22 @@ function setUIControlsState(disabled) {
 
 // Render summary cards in results view
 function renderResultsMetrics(elapsedTimeMs) {
-    document.getElementById("res-total-agents").textContent = totalAgentsToSimulate.toLocaleString();
-    
-    let totalDetections = 0;
+    const dailyCounts = getDailyTripCounts();
+    const totalTrips = dailyCounts.reduce((a, b) => a + b, 0);
+    document.getElementById("res-total-agents").textContent = totalTrips.toLocaleString();
+
+    let totalContacts = 0;
     panels.forEach(p => {
         const isChecked = document.getElementById(`chk-result-${p.id}`)?.checked ?? document.getElementById(`chk-${p.id}`)?.checked ?? true;
         if (isChecked) {
-            totalDetections += p.crossedAgents.size;
+            totalContacts += p.contactCount;
         }
     });
-    document.getElementById("res-total-crossings").textContent = totalDetections.toLocaleString();
-    
+    document.getElementById("res-total-crossings").textContent = totalContacts.toLocaleString();
+
     recalculateCoverage();
-    
-    const speedThroughput = Math.round(totalAgentsToSimulate / (elapsedTimeMs / 1000.0));
+
+    const speedThroughput = Math.round(totalTrips / (elapsedTimeMs / 1000.0));
     document.getElementById("res-speed-throughput").textContent = `${speedThroughput.toLocaleString()} agents/s`;
     document.getElementById("res-elapsed-time").textContent = `${elapsedTimeMs.toLocaleString()}ms`;
 }
@@ -943,19 +1144,17 @@ function renderResultsMetrics(elapsedTimeMs) {
 // Recalculate unique agents crossed and update coverage text (Results Screen)
 function recalculateCoverage() {
     const uniqueAgents = new Set();
-    let totalDetections = 0;
-    
+    let totalContacts = 0;
+
     panels.forEach(p => {
         const checkbox = document.getElementById(`chk-result-${p.id}`);
         const isChecked = checkbox ? checkbox.checked : (document.getElementById(`chk-${p.id}`)?.checked ?? true);
-        
+
         if (isChecked) {
-            p.crossedAgents.forEach(agentId => {
-                uniqueAgents.add(agentId);
-            });
-            totalDetections += p.crossedAgents.size;
+            p.crossedAgents.forEach(agentId => uniqueAgents.add(agentId));
+            totalContacts += p.contactCount;
         }
-        
+
         const tr = document.getElementById(`row-${p.id}`);
         if (tr) {
             if (isChecked) {
@@ -965,11 +1164,11 @@ function recalculateCoverage() {
             }
         }
     });
-    
+
     document.getElementById("unique-cross-count").textContent = uniqueAgents.size.toLocaleString();
-    document.getElementById("res-total-crossings").textContent = totalDetections.toLocaleString();
-    
-    const coveragePercent = ((uniqueAgents.size / totalAgentsToSimulate) * 100).toFixed(2);
+    document.getElementById("res-total-crossings").textContent = totalContacts.toLocaleString();
+
+    const coveragePercent = ((uniqueAgents.size / weeklyUniquePool) * 100).toFixed(2);
     document.getElementById("coverage-rate").textContent = `${coveragePercent}%`;
 }
 
@@ -989,10 +1188,10 @@ function renderCharts() {
         });
         return;
     }
-    
+
     if (storeVisitsChart) storeVisitsChart.destroy();
     if (floorCrossingsChart) floorCrossingsChart.destroy();
-    
+
     // Store category Chart
     const ctxStore = document.getElementById("chart-store-visits").getContext("2d");
     const categoryLabels = {
@@ -1007,10 +1206,10 @@ function renderCharts() {
         rebelsport: "Rebel Sport",
         specialty: "Specialty"
     };
-    
+
     const labels = Object.keys(shopCategoryVisits).map(k => categoryLabels[k] || k);
     const dataVisits = Object.values(shopCategoryVisits);
-    
+
     storeVisitsChart = new Chart(ctxStore, {
         type: 'bar',
         data: {
@@ -1073,7 +1272,7 @@ function renderCharts() {
             }
         }
     });
-    
+
     // Floor Doughnut chart
     const ctxFloor = document.getElementById("chart-floor-crossings").getContext("2d");
     const floorUniqueCounts = { "1": 0, "2": 0, "3": 0 };
@@ -1089,10 +1288,10 @@ function renderCharts() {
         });
         floorUniqueCounts[f] = floorAgents.size;
     });
-    
+
     const floorLabels = ["Level 1", "Level 2", "Level 3"];
     const dataFloors = [floorUniqueCounts["1"], floorUniqueCounts["2"], floorUniqueCounts["3"]];
-    
+
     floorCrossingsChart = new Chart(ctxFloor, {
         type: 'doughnut',
         data: {
@@ -1144,44 +1343,44 @@ function renderCharts() {
 function renderPanelsSelectionGrid() {
     const grid = document.getElementById("panels-selection-grid");
     grid.innerHTML = "";
-    
+
     const filteredPanels = panels.filter(panel => {
-        return panel.id.toLowerCase().includes(currentSearchQuery.toLowerCase()) || 
+        return panel.id.toLowerCase().includes(currentSearchQuery.toLowerCase()) ||
                panel.orientation.toString().includes(currentSearchQuery);
     });
-    
+
     if (filteredPanels.length === 0) {
         grid.innerHTML = `<div class="loading-placeholder"><p>No panels match search.</p></div>`;
         return;
     }
-    
+
     filteredPanels.forEach(panel => {
         const card = document.createElement("label");
         card.className = "panel-card-select";
         card.setAttribute("for", `chk-${panel.id}`);
-        
+
         let flClass = "fl-1";
         if (panel.floor === "2") flClass = "fl-2";
         if (panel.floor === "3") flClass = "fl-3";
-        
+
         card.innerHTML = `
             <input type="checkbox" id="chk-${panel.id}" checked />
             <div class="panel-card-info">
                 <div class="panel-card-id">${panel.name}</div>
                 <div class="panel-card-meta">
-                    <span class="panel-card-floor-badge ${flClass}">L${panel.floor}</span> 
+                    <span class="panel-card-floor-badge ${flClass}">L${panel.floor}</span>
                     Orient: ${panel.orientation}°
                 </div>
             </div>
         `;
-        
+
         card.querySelector("input").addEventListener("change", () => {
             updateSelectedPanelsHeaderCount();
             updatePanelMapVisuals();
         });
         grid.appendChild(card);
     });
-    
+
     updateSelectedPanelsHeaderCount();
 }
 
@@ -1192,7 +1391,7 @@ function updateSelectedPanelsHeaderCount() {
         const chk = document.getElementById(`chk-${p.id}`);
         if (chk && chk.checked) selected++;
     });
-    
+
     document.getElementById("panels-selected-count").textContent = selected;
     document.getElementById("panels-total-count").textContent = panels.length;
 }
@@ -1201,36 +1400,37 @@ function updateSelectedPanelsHeaderCount() {
 function renderLeaderboardTable() {
     const tbody = document.getElementById("leaderboard-tbody");
     tbody.innerHTML = "";
-    
+
     const searchVal = document.getElementById("leaderboard-search").value.toLowerCase();
-    
+
     const sortedPanels = [...panels]
         .filter(p => p.id.toLowerCase().includes(searchVal) || p.floor.includes(searchVal))
         .sort((a, b) => b.crossedAgents.size - a.crossedAgents.size);
-    
+
     if (sortedPanels.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:#64748b; padding:2rem;">No matching leaderboard rows.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color:#64748b; padding:2rem;">No matching leaderboard rows.</td></tr>`;
         return;
     }
-    
+
     sortedPanels.forEach((panel, index) => {
         const isChecked = document.getElementById(`chk-${panel.id}`)?.checked ?? true;
-        const count = panel.crossedAgents.size;
-        const percent = ((count / totalAgentsToSimulate) * 100).toFixed(2);
-        
+        const uniqueCount = panel.crossedAgents.size;
+        const contactCount = panel.contactCount;
+        const percent = ((uniqueCount / weeklyUniquePool) * 100).toFixed(2);
+
         let rankBadgeClass = "rank-badge";
         if (index === 0) rankBadgeClass += " top-1";
         else if (index === 1) rankBadgeClass += " top-2";
         else if (index === 2) rankBadgeClass += " top-3";
-        
+
         const tr = document.createElement("tr");
         tr.id = `row-${panel.id}`;
-        
+
         let trClass = "";
         if (!isChecked) trClass += "inactive-row ";
         if (selectedReferencePanel && selectedReferencePanel.id === panel.id) trClass += "reference-active";
         if (trClass) tr.className = trClass.trim();
-        
+
         tr.innerHTML = `
             <td><div class="${rankBadgeClass}">${index + 1}</div></td>
             <td class="td-id">${panel.name}</td>
@@ -1243,7 +1443,10 @@ function renderLeaderboardTable() {
                 <input type="checkbox" id="chk-result-${panel.id}" ${isChecked ? 'checked' : ''} />
             </td>
             <td style="text-align: right; font-weight:700; font-family: var(--font-mono);" class="neon-cyan">
-                ${count.toLocaleString()}
+                ${uniqueCount.toLocaleString()}
+            </td>
+            <td style="text-align: right; font-weight:600; font-family: var(--font-mono);">
+                ${contactCount.toLocaleString()}
             </td>
             <td>
                 <div class="exposure-bar-container">
@@ -1254,19 +1457,19 @@ function renderLeaderboardTable() {
                 </div>
             </td>
         `;
-        
+
         const checkbox = tr.querySelector(`#chk-result-${panel.id}`);
         checkbox.addEventListener("change", () => {
             // Sync setup checkbox
             const setupChk = document.getElementById(`chk-${panel.id}`);
             if (setupChk) setupChk.checked = checkbox.checked;
-            
+
             recalculateCoverage();
             renderCharts();
             updatePanelMapVisuals();
             updateSelectedPanelsHeaderCount();
         });
-        
+
         // Select as reference on row click (if checkbox is not clicked)
         tr.addEventListener("click", (e) => {
             if (e.target.tagName === "INPUT" && e.target.type === "checkbox") {
@@ -1274,7 +1477,7 @@ function renderLeaderboardTable() {
             }
             selectReferencePanel(panel.id);
         });
-        
+
         tbody.appendChild(tr);
     });
 }
@@ -1282,20 +1485,27 @@ function renderLeaderboardTable() {
 // Export Panel scores and metrics to CSV
 function exportPanelScoresToCSV() {
     if (!panels || panels.length === 0) return;
-    
+
     const sortedPanels = [...panels].sort((a, b) => b.crossedAgents.size - a.crossedAgents.size);
     const activePanelsCount = panels.filter(p => document.getElementById(`chk-${p.id}`)?.checked).length;
-    
+
     const metadata = [
         `# Westfield Newmarket Pedestrian Gravity Simulation Portal - Panel Scores Report`,
         `# Export Timestamp: ${new Date().toISOString()}`,
         `#`,
         `# --- SIMULATION CONFIGURATION PARAMETERS ---`,
-        `# Total Agents: ${totalAgentsToSimulate.toLocaleString()}`,
+        `# Weekly Visits (non-unique): ${weeklyVisitsTotal.toLocaleString()}`,
+        `# Weekly Unique People: ${weeklyUniquePool.toLocaleString()}`,
+        `# Daily Weights (Profile A): ${DAILY_VISIT_WEIGHTS.join(", ")}`,
         `# Min Shop Visits: ${minShopVisits}`,
         `# Max Shop Visits: ${maxShopVisits}`,
         `# Base Walking Speed (m/s): ${baseWalkSpeedMS}`,
         `# Huff Decay Exponent (alpha): ${decayExponent}`,
+        `# Routing Mode: ${routingMode}`,
+        `# Route Progress Beta: ${routeBetaProgress}`,
+        `# Route Randomness: ${routeRandomness}`,
+        `# Escalator Zone Boost: ${routeZoneBoost}`,
+        `# Route Vertical Beta: ${routeBetaVertical}`,
         `# Max Viewing Distance (m): ${maxViewingDistance}`,
         `# Viewing Cone Angle: ${viewingConeAngle}°`,
         `# Active Sensors: ${activePanelsCount} / ${panels.length}`,
@@ -1303,7 +1513,7 @@ function exportPanelScoresToCSV() {
         `# -------------------------------------------`,
         `#`
     ];
-    
+
     const headers = [
         "Rank",
         "Panel ID",
@@ -1312,15 +1522,16 @@ function exportPanelScoresToCSV() {
         "Latitude",
         "Longitude",
         "Active",
-        "Unique Crossed",
+        "Unique Reach",
+        "Contacts",
         "Exposure Efficiency (%)"
     ];
-    
+
     const rows = sortedPanels.map((panel, index) => {
         const isChecked = document.getElementById(`chk-result-${panel.id}`)?.checked ?? true;
-        const count = panel.crossedAgents.size;
-        const percent = ((count / totalAgentsToSimulate) * 100).toFixed(2);
-        
+        const uniqueCount = panel.crossedAgents.size;
+        const percent = ((uniqueCount / weeklyUniquePool) * 100).toFixed(2);
+
         return [
             index + 1,
             `"${panel.name}"`,
@@ -1329,24 +1540,25 @@ function exportPanelScoresToCSV() {
             `${panel.lat}`,
             `${panel.lon}`,
             `"${isChecked ? 'Yes' : 'No'}"`,
-            `${count}`,
+            `${uniqueCount}`,
+            `${panel.contactCount}`,
             `${percent}`
         ];
     });
-    
+
     const csvContent = metadata.concat([headers.join(",")])
                                .concat(rows.map(row => row.join(",")))
                                .join("\n");
-    
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    
+
     const dateStr = new Date().toISOString().slice(0, 10);
     const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
     link.setAttribute("download", `westfield_newmarket_panel_scores_${dateStr}_${timeStr}.csv`);
-    
+
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -1355,12 +1567,19 @@ function exportPanelScoresToCSV() {
 
 // Bind UI controls and events
 function bindUIControls() {
-    // Sliders & inputs
-    const sAgents = document.getElementById("input-total-agents");
-    sAgents.addEventListener("input", () => {
-        document.getElementById("val-total-agents").textContent = parseInt(sAgents.value).toLocaleString();
+    // Weekly footfall sliders
+    const sWeeklyVisits = document.getElementById("input-weekly-visits");
+    sWeeklyVisits.addEventListener("input", () => {
+        document.getElementById("val-weekly-visits").textContent = parseInt(sWeeklyVisits.value).toLocaleString();
+        updateDailyWeightsPreview();
     });
-    
+
+    const sWeeklyUniques = document.getElementById("input-weekly-uniques");
+    sWeeklyUniques.addEventListener("input", () => {
+        document.getElementById("val-weekly-uniques").textContent = parseInt(sWeeklyUniques.value).toLocaleString();
+    });
+    updateDailyWeightsPreview();
+
     const sMin = document.getElementById("input-min-visits");
     sMin.addEventListener("input", () => {
         const val = parseInt(sMin.value);
@@ -1371,7 +1590,7 @@ function bindUIControls() {
             document.getElementById("val-max-visits").textContent = val;
         }
     });
-    
+
     const sMax = document.getElementById("input-max-visits");
     sMax.addEventListener("input", () => {
         const val = parseInt(sMax.value);
@@ -1382,36 +1601,66 @@ function bindUIControls() {
             document.getElementById("val-min-visits").textContent = val;
         }
     });
-    
+
     const sSpeed = document.getElementById("input-walk-speed");
     sSpeed.addEventListener("input", () => {
         document.getElementById("val-walk-speed").textContent = `${parseFloat(sSpeed.value).toFixed(1)} m/s`;
     });
-    
+
     const sDecay = document.getElementById("input-decay-exponent");
     sDecay.addEventListener("input", () => {
         document.getElementById("val-decay-exponent").textContent = parseFloat(sDecay.value).toFixed(1);
     });
-    
+
+    const segmentLogitControls = document.getElementById("segment-logit-controls");
+    const sRoutingMode = document.getElementById("input-routing-mode");
+    const syncRoutingControls = () => {
+        if (segmentLogitControls) {
+            segmentLogitControls.style.display = sRoutingMode.value === "segment_logit" ? "block" : "none";
+        }
+    };
+    sRoutingMode.addEventListener("change", syncRoutingControls);
+    syncRoutingControls();
+
+    const sRouteBeta = document.getElementById("input-route-beta");
+    sRouteBeta.addEventListener("input", () => {
+        document.getElementById("val-route-beta").textContent = parseFloat(sRouteBeta.value).toFixed(2);
+    });
+
+    const sRouteRand = document.getElementById("input-route-randomness");
+    sRouteRand.addEventListener("input", () => {
+        document.getElementById("val-route-randomness").textContent = parseFloat(sRouteRand.value).toFixed(1);
+    });
+
+    const sRouteZone = document.getElementById("input-route-zone-boost");
+    sRouteZone.addEventListener("input", () => {
+        document.getElementById("val-route-zone-boost").textContent = parseFloat(sRouteZone.value).toFixed(2);
+    });
+
+    const sRouteVert = document.getElementById("input-route-vertical");
+    sRouteVert.addEventListener("input", () => {
+        document.getElementById("val-route-vertical").textContent = parseFloat(sRouteVert.value).toFixed(1);
+    });
+
     const sViewDist = document.getElementById("input-view-dist");
     sViewDist.addEventListener("input", () => {
         document.getElementById("val-view-dist").textContent = `${parseFloat(sViewDist.value)}m`;
         renderPanelCones();
     });
-    
+
     const sConeAngle = document.getElementById("input-cone-angle");
     sConeAngle.addEventListener("input", () => {
         document.getElementById("val-cone-angle").textContent = `${parseFloat(sConeAngle.value)}°`;
         renderPanelCones();
     });
-    
+
     // Graph switch
     const chkGraph = document.getElementById("chk-show-graph");
     chkGraph.addEventListener("change", () => {
         showGraph = chkGraph.checked;
         renderGraphOverlay();
     });
-    
+
     // Shop Weights attractiveness sync
     const wtSliders = [
         { id: "wt-farmers", labelId: "val-wt-farmers" },
@@ -1431,14 +1680,14 @@ function bindUIControls() {
             document.getElementById(slider.labelId).textContent = `${el.value}%`;
         });
     });
-    
+
     // Panel Search
     const panelSearch = document.getElementById("panel-search");
     panelSearch.addEventListener("input", () => {
         currentSearchQuery = panelSearch.value;
         renderPanelsSelectionGrid();
     });
-    
+
     // Bulk actions
     document.getElementById("btn-select-all").addEventListener("click", () => {
         panels.forEach(p => {
@@ -1448,7 +1697,7 @@ function bindUIControls() {
         updateSelectedPanelsHeaderCount();
         updatePanelMapVisuals();
     });
-    
+
     document.getElementById("btn-select-none").addEventListener("click", () => {
         panels.forEach(p => {
             const chk = document.getElementById(`chk-${p.id}`);
@@ -1457,7 +1706,7 @@ function bindUIControls() {
         updateSelectedPanelsHeaderCount();
         updatePanelMapVisuals();
     });
-    
+
     // Floor-specific selectors
     document.getElementById("btn-select-fl1").addEventListener("click", () => {
         panels.forEach(p => {
@@ -1483,30 +1732,30 @@ function bindUIControls() {
         updateSelectedPanelsHeaderCount();
         updatePanelMapVisuals();
     });
-    
+
     // Map Floor Overlay Selector Buttons
     const mapFloorBtns = document.querySelectorAll(".floor-btn");
     mapFloorBtns.forEach(btn => {
         btn.addEventListener("click", () => {
             mapFloorBtns.forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
-            
+
             const prevFloor = activeFloor;
             activeFloor = btn.getAttribute("data-floor");
-            
+
             // Toggle layer
             if (floorLayers[prevFloor]) map.removeLayer(floorLayers[prevFloor]);
             if (floorLayers[activeFloor]) map.addLayer(floorLayers[activeFloor]);
-            
+
             renderGraphOverlay();
             renderPanelMarkers();
             renderPanelCones();
         });
     });
-    
+
     // Run button
     document.getElementById("btn-run").addEventListener("click", runSimulation);
-    
+
     // Reset button
     document.getElementById("btn-reset").addEventListener("click", () => {
         // Toggle card visual elements back
@@ -1514,9 +1763,9 @@ function bindUIControls() {
         document.getElementById("state-results-details").style.display = "none";
         document.getElementById("state-setup-stats").style.display = "flex";
         document.getElementById("state-setup-list").style.display = "block";
-        
+
         document.getElementById("btn-reset").setAttribute("disabled", "true");
-        
+
         // Reset tabs
         const tabCoverage = document.getElementById("btn-tab-coverage");
         const tabSimilarity = document.getElementById("btn-tab-similarity");
@@ -1528,7 +1777,7 @@ function bindUIControls() {
             contentCoverage.style.display = "block";
             contentSimilarity.style.display = "none";
         }
-        
+
         // Clear similarity reference
         clearReferencePanel();
         const compA = document.getElementById("compare-panel-a");
@@ -1536,15 +1785,15 @@ function bindUIControls() {
         if (compA) compA.value = "";
         if (compB) compB.value = "";
         updateDetailedComparison();
-        
+
         // Clear counts
-        panels.forEach(p => p.crossedAgents.clear());
-        
+        resetPanelStats();
+
         // Reset Visuals
         renderPanelsSelectionGrid();
         updatePanelMapVisuals();
     });
-    
+
     // Leaderboard search
     const leadSearch = document.getElementById("leaderboard-search");
     leadSearch.addEventListener("input", renderLeaderboardTable);
@@ -1554,7 +1803,7 @@ function bindUIControls() {
     if (btnExport) {
         btnExport.addEventListener("click", exportPanelScoresToCSV);
     }
-    
+
     // Leaderboard bulk actions
     document.getElementById("btn-leaderboard-select-all").addEventListener("click", () => {
         panels.forEach(p => {
@@ -1568,7 +1817,7 @@ function bindUIControls() {
         updatePanelMapVisuals();
         updateSelectedPanelsHeaderCount();
     });
-    
+
     document.getElementById("btn-leaderboard-select-none").addEventListener("click", () => {
         panels.forEach(p => {
             const chk = document.getElementById(`chk-result-${p.id}`);
@@ -1581,13 +1830,13 @@ function bindUIControls() {
         updatePanelMapVisuals();
         updateSelectedPanelsHeaderCount();
     });
-    
+
     // Tab switching listeners
     const tabCoverage = document.getElementById("btn-tab-coverage");
     const tabSimilarity = document.getElementById("btn-tab-similarity");
     const contentCoverage = document.getElementById("tab-content-coverage");
     const contentSimilarity = document.getElementById("tab-content-similarity");
-    
+
     if (tabCoverage && tabSimilarity) {
         tabCoverage.addEventListener("click", () => {
             tabCoverage.classList.add("active");
@@ -1595,7 +1844,7 @@ function bindUIControls() {
             contentCoverage.style.display = "block";
             contentSimilarity.style.display = "none";
         });
-        
+
         tabSimilarity.addEventListener("click", () => {
             tabSimilarity.classList.add("active");
             tabCoverage.classList.remove("active");
@@ -1603,7 +1852,7 @@ function bindUIControls() {
             contentSimilarity.style.display = "flex";
         });
     }
-    
+
     // Similarity metric change listener
     const metricSelect = document.getElementById("similarity-metric-select");
     if (metricSelect) {
@@ -1613,7 +1862,7 @@ function bindUIControls() {
             renderPanelCones();
         });
     }
-    
+
     // Detailed Comparison dropdowns change listeners
     const compareA = document.getElementById("compare-panel-a");
     const compareB = document.getElementById("compare-panel-b");
@@ -1627,13 +1876,13 @@ function bindUIControls() {
             updateDetailedComparison();
         });
     }
-    
+
     // JSON Profile Configuration Listeners
     const btnExportConfig = document.getElementById("btn-export-config");
     if (btnExportConfig) {
         btnExportConfig.addEventListener("click", exportConfigJSON);
     }
-    
+
     const btnImportConfigTrigger = document.getElementById("btn-import-config-trigger");
     const fileInput = document.getElementById("input-import-config");
     if (btnImportConfigTrigger && fileInput) {
@@ -1642,7 +1891,7 @@ function bindUIControls() {
         });
         fileInput.addEventListener("change", importConfigJSON);
     }
-    
+
     // Raw Vector Export Listener
     const btnExportVectors = document.getElementById("btn-export-vectors");
     if (btnExportVectors) {
@@ -1654,9 +1903,9 @@ function bindUIControls() {
 function getPanelSimilarity(panelA, panelB, metricType) {
     const setA = panelA.crossedAgents;
     const setB = panelB.crossedAgents;
-    
+
     if (setA.size === 0 && setB.size === 0) return 0;
-    
+
     // Intersection size
     let intersectionSize = 0;
     if (setA.size < setB.size) {
@@ -1668,7 +1917,7 @@ function getPanelSimilarity(panelA, panelB, metricType) {
             if (setA.has(agentId)) intersectionSize++;
         }
     }
-    
+
     if (metricType === "jaccard") {
         const unionSize = setA.size + setB.size - intersectionSize;
         return unionSize === 0 ? 0 : intersectionSize / unionSize;
@@ -1677,6 +1926,9 @@ function getPanelSimilarity(panelA, panelB, metricType) {
         return denom === 0 ? 0 : intersectionSize / denom;
     } else if (metricType === "overlap") {
         return intersectionSize;
+    } else if (metricType === "overlap_coef") {
+        const minSize = Math.min(setA.size, setB.size);
+        return minSize === 0 ? 0 : intersectionSize / minSize;
     }
     return 0;
 }
@@ -1702,20 +1954,20 @@ function getSimilarityColor(score) {
 function updateMapSimilarityColoring() {
     panels.forEach(panel => {
         if (!panel.marker) return;
-        
+
         const element = panel.marker.getElement();
         if (!element) return;
-        
+
         const innerIcon = element.querySelector('.panel-marker-inner');
         if (!innerIcon) return;
-        
+
         innerIcon.style.backgroundColor = "";
         innerIcon.style.boxShadow = "";
         innerIcon.style.border = "";
         innerIcon.classList.remove("reference-marker");
-        
-        let tooltipContent = `<b>${panel.name}</b><br>Floor: L${panel.floor}<br>Orient: ${panel.orientation}°<br>Unique Crossed: <b>${panel.crossedAgents.size.toLocaleString()}</b>`;
-        
+
+        let tooltipContent = `<b>${panel.name}</b><br>Floor: L${panel.floor}<br>Orient: ${panel.orientation}°<br>Unique Reach: <b>${panel.crossedAgents.size.toLocaleString()}</b><br>Contacts: <b>${panel.contactCount.toLocaleString()}</b>`;
+
         if (selectedReferencePanel) {
             if (panel.id === selectedReferencePanel.id) {
                 innerIcon.style.backgroundColor = "#fbbf24";
@@ -1727,22 +1979,24 @@ function updateMapSimilarityColoring() {
                 const score = getPanelSimilarity(selectedReferencePanel, panel, selectedSimilarityMetric);
                 const normalized = normalizeScore(score, selectedSimilarityMetric, selectedReferencePanel);
                 const color = getSimilarityColor(normalized);
-                
+
                 innerIcon.style.backgroundColor = color;
                 innerIcon.style.boxShadow = `0 0 8px ${color}`;
-                
+
                 let formattedScore = "";
                 if (selectedSimilarityMetric === "jaccard") {
                     formattedScore = `${(score * 100).toFixed(1)}% (Jaccard)`;
                 } else if (selectedSimilarityMetric === "cosine") {
                     formattedScore = `${(score * 100).toFixed(1)}% (Cosine)`;
+                } else if (selectedSimilarityMetric === "overlap_coef") {
+                    formattedScore = `${(score * 100).toFixed(1)}% (Overlap Coef)`;
                 } else {
                     formattedScore = `${score.toLocaleString()} agents (Overlap)`;
                 }
                 tooltipContent += `<br><span style="color: #c084fc; font-weight: 600;">Similarity: ${formattedScore}</span>`;
             }
         }
-        
+
         panel.marker.setTooltipContent(tooltipContent);
     });
 }
@@ -1750,19 +2004,19 @@ function updateMapSimilarityColoring() {
 function selectReferencePanel(panelId) {
     const panel = panels.find(p => p.id === panelId);
     if (!panel) return;
-    
+
     if (selectedReferencePanel && selectedReferencePanel.id === panelId) {
         clearReferencePanel();
         return;
     }
-    
+
     selectedReferencePanel = panel;
-    
+
     updateReferencePanelUI();
     updateMapSimilarityColoring();
     renderPanelCones();
     renderLeaderboardTable();
-    
+
     const selectA = document.getElementById("compare-panel-a");
     if (selectA) {
         selectA.value = panelId;
@@ -1772,7 +2026,7 @@ function selectReferencePanel(panelId) {
 
 function clearReferencePanel() {
     selectedReferencePanel = null;
-    
+
     updateReferencePanelUI();
     updateMapSimilarityColoring();
     renderPanelCones();
@@ -1782,7 +2036,7 @@ function clearReferencePanel() {
 function updateReferencePanelUI() {
     const el = document.getElementById("ref-panel-status");
     if (!el) return;
-    
+
     if (selectedReferencePanel) {
         el.innerHTML = `
             <div class="ref-panel-details">
@@ -1803,29 +2057,29 @@ function updateReferencePanelUI() {
 function populateComparisonDropdowns() {
     const selectA = document.getElementById("compare-panel-a");
     const selectB = document.getElementById("compare-panel-b");
-    
+
     if (!selectA || !selectB) return;
-    
+
     const valA = selectA.value;
     const valB = selectB.value;
-    
+
     selectA.innerHTML = '<option value="">Select Panel A</option>';
     selectB.innerHTML = '<option value="">Select Panel B</option>';
-    
+
     const sortedPanels = [...panels].sort((a, b) => a.id.localeCompare(b.id));
-    
+
     sortedPanels.forEach(panel => {
         const optA = document.createElement("option");
         optA.value = panel.id;
         optA.textContent = `Panel ${panel.id} (L${panel.floor})`;
         selectA.appendChild(optA);
-        
+
         const optB = document.createElement("option");
         optB.value = panel.id;
         optB.textContent = `Panel ${panel.id} (L${panel.floor})`;
         selectB.appendChild(optB);
     });
-    
+
     selectA.value = valA;
     selectB.value = valB;
 }
@@ -1834,52 +2088,53 @@ function updateDetailedComparison() {
     const selectA = document.getElementById("compare-panel-a");
     const selectB = document.getElementById("compare-panel-b");
     const resultsContainer = document.getElementById("comparison-results");
-    
+
     if (!selectA || !selectB || !resultsContainer) return;
-    
+
     const idA = selectA.value;
     const idB = selectB.value;
-    
+
     if (!idA || !idB) {
         resultsContainer.innerHTML = `<div class="no-selection-msg">Select two sensors to compare</div>`;
         return;
     }
-    
+
     if (idA === idB) {
         resultsContainer.innerHTML = `<div class="no-selection-msg" style="color: var(--accent-red);">Select different sensors to compare</div>`;
         return;
     }
-    
+
     const panelA = panels.find(p => p.id === idA);
     const panelB = panels.find(p => p.id === idB);
-    
+
     if (!panelA || !panelB) return;
-    
+
     const setA = panelA.crossedAgents;
     const setB = panelB.crossedAgents;
-    
+
     let sharedCount = 0;
     for (let agentId of setA) {
         if (setB.has(agentId)) sharedCount++;
     }
-    
+
     const jaccard = getPanelSimilarity(panelA, panelB, "jaccard");
     const cosine = getPanelSimilarity(panelA, panelB, "cosine");
-    
+    const overlapCoef = getPanelSimilarity(panelA, panelB, "overlap_coef");
+
     const onlyA = setA.size - sharedCount;
     const onlyB = setB.size - sharedCount;
     const totalUnique = onlyA + sharedCount + onlyB;
-    
+
     let pctA = 0;
     let pctShared = 0;
     let pctB = 0;
-    
+
     if (totalUnique > 0) {
         pctA = (onlyA / totalUnique) * 100;
         pctShared = (sharedCount / totalUnique) * 100;
         pctB = (onlyB / totalUnique) * 100;
     }
-    
+
     resultsContainer.innerHTML = `
         <div class="comparison-metric-row">
             <span class="comparison-metric-label">Panel A unique agents</span>
@@ -1894,6 +2149,10 @@ function updateDetailedComparison() {
             <span class="comparison-metric-val highlight-purple">${sharedCount.toLocaleString()}</span>
         </div>
         <div class="comparison-metric-row">
+            <span class="comparison-metric-label">Overlap Coefficient</span>
+            <span class="comparison-metric-val highlight-purple">${(overlapCoef * 100).toFixed(1)}%</span>
+        </div>
+        <div class="comparison-metric-row">
             <span class="comparison-metric-label">Jaccard Similarity</span>
             <span class="comparison-metric-val">${(jaccard * 100).toFixed(1)}%</span>
         </div>
@@ -1901,7 +2160,7 @@ function updateDetailedComparison() {
             <span class="comparison-metric-label">Cosine Similarity</span>
             <span class="comparison-metric-val">${(cosine * 100).toFixed(1)}%</span>
         </div>
-        
+
         <div class="overlap-bar-container">
             <div class="overlap-bar-title">Audience Overlap (Unique total: ${totalUnique.toLocaleString()})</div>
             <div class="overlap-bar-wrapper">
@@ -1931,18 +2190,25 @@ function updateDetailedComparison() {
 function exportConfigJSON() {
     const config = {
         timestamp: new Date().toISOString(),
-        totalAgents: parseInt(document.getElementById("input-total-agents").value),
+        weeklyVisits: parseInt(document.getElementById("input-weekly-visits").value),
+        weeklyUniques: parseInt(document.getElementById("input-weekly-uniques").value),
+        dailyWeights: DAILY_VISIT_WEIGHTS,
         minVisits: parseInt(document.getElementById("input-min-visits").value),
         maxVisits: parseInt(document.getElementById("input-max-visits").value),
         walkSpeed: parseFloat(document.getElementById("input-walk-speed").value),
         decayExponent: parseFloat(document.getElementById("input-decay-exponent").value),
+        routingMode: document.getElementById("input-routing-mode").value,
+        routeBetaProgress: parseFloat(document.getElementById("input-route-beta").value),
+        routeRandomness: parseFloat(document.getElementById("input-route-randomness").value),
+        routeZoneBoost: parseFloat(document.getElementById("input-route-zone-boost").value),
+        routeBetaVertical: parseFloat(document.getElementById("input-route-vertical").value),
         viewDist: parseFloat(document.getElementById("input-view-dist").value),
         coneAngle: parseFloat(document.getElementById("input-cone-angle").value),
         showGraph: document.getElementById("chk-show-graph").checked,
         categoryWeights: {},
         activePanelIds: []
     };
-    
+
     // Attractiveness weights
     for (const cat in categoryWeights) {
         const slider = document.getElementById(`wt-${cat}`);
@@ -1952,7 +2218,7 @@ function exportConfigJSON() {
             config.categoryWeights[cat] = categoryWeights[cat];
         }
     }
-    
+
     // Active panels checkbox state
     panels.forEach(p => {
         const chk = document.getElementById(`chk-${p.id}`);
@@ -1960,17 +2226,17 @@ function exportConfigJSON() {
             config.activePanelIds.push(p.id);
         }
     });
-    
+
     const jsonStr = JSON.stringify(config, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    
+
     const dateStr = new Date().toISOString().slice(0, 10);
     const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
     link.setAttribute("download", `westfield_newmarket_sim_config_${dateStr}_${timeStr}.json`);
-    
+
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -1980,61 +2246,100 @@ function exportConfigJSON() {
 function importConfigJSON(event) {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = function(e) {
         try {
             const config = JSON.parse(e.target.result);
-            
+
             // Set UI sliders & inputs
-            const sAgents = document.getElementById("input-total-agents");
-            if (sAgents && config.totalAgents !== undefined) {
-                sAgents.value = config.totalAgents;
-                sAgents.dispatchEvent(new Event("input"));
+            const sWeeklyVisits = document.getElementById("input-weekly-visits");
+            if (sWeeklyVisits && config.weeklyVisits !== undefined) {
+                sWeeklyVisits.value = config.weeklyVisits;
+                sWeeklyVisits.dispatchEvent(new Event("input"));
+            } else if (sWeeklyVisits && config.totalAgents !== undefined) {
+                sWeeklyVisits.value = config.totalAgents;
+                sWeeklyVisits.dispatchEvent(new Event("input"));
             }
-            
+
+            const sWeeklyUniques = document.getElementById("input-weekly-uniques");
+            if (sWeeklyUniques && config.weeklyUniques !== undefined) {
+                sWeeklyUniques.value = config.weeklyUniques;
+                sWeeklyUniques.dispatchEvent(new Event("input"));
+            }
+
             const sMin = document.getElementById("input-min-visits");
             if (sMin && config.minVisits !== undefined) {
                 sMin.value = config.minVisits;
                 sMin.dispatchEvent(new Event("input"));
             }
-            
+
             const sMax = document.getElementById("input-max-visits");
             if (sMax && config.maxVisits !== undefined) {
                 sMax.value = config.maxVisits;
                 sMax.dispatchEvent(new Event("input"));
             }
-            
+
             const sSpeed = document.getElementById("input-walk-speed");
             if (sSpeed && config.walkSpeed !== undefined) {
                 sSpeed.value = config.walkSpeed;
                 sSpeed.dispatchEvent(new Event("input"));
             }
-            
+
             const sDecay = document.getElementById("input-decay-exponent");
             if (sDecay && config.decayExponent !== undefined) {
                 sDecay.value = config.decayExponent;
                 sDecay.dispatchEvent(new Event("input"));
             }
-            
+
+            const sRouting = document.getElementById("input-routing-mode");
+            if (sRouting && config.routingMode !== undefined) {
+                sRouting.value = config.routingMode;
+                sRouting.dispatchEvent(new Event("change"));
+            }
+
+            const sRouteBeta = document.getElementById("input-route-beta");
+            if (sRouteBeta && config.routeBetaProgress !== undefined) {
+                sRouteBeta.value = config.routeBetaProgress;
+                sRouteBeta.dispatchEvent(new Event("input"));
+            }
+
+            const sRouteRand = document.getElementById("input-route-randomness");
+            if (sRouteRand && config.routeRandomness !== undefined) {
+                sRouteRand.value = config.routeRandomness;
+                sRouteRand.dispatchEvent(new Event("input"));
+            }
+
+            const sRouteZone = document.getElementById("input-route-zone-boost");
+            if (sRouteZone && config.routeZoneBoost !== undefined) {
+                sRouteZone.value = config.routeZoneBoost;
+                sRouteZone.dispatchEvent(new Event("input"));
+            }
+
+            const sRouteVert = document.getElementById("input-route-vertical");
+            if (sRouteVert && config.routeBetaVertical !== undefined) {
+                sRouteVert.value = config.routeBetaVertical;
+                sRouteVert.dispatchEvent(new Event("input"));
+            }
+
             const sDist = document.getElementById("input-view-dist");
             if (sDist && config.viewDist !== undefined) {
                 sDist.value = config.viewDist;
                 sDist.dispatchEvent(new Event("input"));
             }
-            
+
             const sAngle = document.getElementById("input-cone-angle");
             if (sAngle && config.coneAngle !== undefined) {
                 sAngle.value = config.coneAngle;
                 sAngle.dispatchEvent(new Event("input"));
             }
-            
+
             const chkGraph = document.getElementById("chk-show-graph");
             if (chkGraph && config.showGraph !== undefined) {
                 chkGraph.checked = config.showGraph;
                 chkGraph.dispatchEvent(new Event("change"));
             }
-            
+
             // Category weights
             if (config.categoryWeights) {
                 for (const cat in config.categoryWeights) {
@@ -2045,7 +2350,7 @@ function importConfigJSON(event) {
                     }
                 }
             }
-            
+
             // Active panels
             if (config.activePanelIds) {
                 const activeSet = new Set(config.activePanelIds);
@@ -2057,11 +2362,11 @@ function importConfigJSON(event) {
                     }
                 });
             }
-            
+
             // Clear file input value to allow uploading same file again
             event.target.value = "";
             alert("Configuration profile imported successfully!");
-            
+
         } catch(err) {
             console.error("Failed to parse JSON config file:", err);
             alert("Error: Invalid configuration file format.");
@@ -2076,58 +2381,46 @@ function exportInteractionVectors() {
         alert("No panels loaded.");
         return;
     }
-    
+
     // Check if simulation has been run (crossedAgents has data)
     const hasData = panels.some(p => p.crossedAgents.size > 0);
     if (!hasData) {
         alert("Please run the simulation first to populate agent interactions.");
         return;
     }
-    
+
     const format = document.getElementById("select-vector-format").value;
-    const numAgents = totalAgentsToSimulate;
-    
+    const numAgents = weeklyUniquePool;
+
     const headers = ["Panel ID", "Format", "Interaction Data"];
     const rows = [];
-    
+
     panels.forEach(panel => {
         const set = panel.crossedAgents;
         let vectorData = "";
-        
+
         if (format === "binary") {
             const arr = new Array(numAgents).fill('0');
             set.forEach(agentId => {
-                let agentIndex;
-                if (typeof agentId === 'string') {
-                    agentIndex = parseInt(agentId.replace("agent_", ""), 10);
-                } else {
-                    agentIndex = parseInt(agentId, 10);
-                }
-                if (isNaN(agentIndex)) return;
-                
+                const agentIndex = parsePersonIndex(agentId);
+                if (agentIndex === null) return;
                 const idx = agentIndex - 1;
                 if (idx >= 0 && idx < numAgents) {
                     arr[idx] = '1';
                 }
             });
             vectorData = arr.join('');
-            
+
         } else if (format === "base64") {
             const numBytes = Math.ceil(numAgents / 8);
             const bytes = new Uint8Array(numBytes);
             set.forEach(agentId => {
-                let agentIndex;
-                if (typeof agentId === 'string') {
-                    agentIndex = parseInt(agentId.replace("agent_", ""), 10);
-                } else {
-                    agentIndex = parseInt(agentId, 10);
-                }
-                if (isNaN(agentIndex)) return;
-                
+                const agentIndex = parsePersonIndex(agentId);
+                if (agentIndex === null) return;
                 const idx = agentIndex - 1;
                 if (idx >= 0 && idx < numAgents) {
                     const byteIdx = Math.floor(idx / 8);
-                    const bitIdx = 7 - (idx % 8); // MSB-first bit order
+                    const bitIdx = 7 - (idx % 8);
                     bytes[byteIdx] |= (1 << bitIdx);
                 }
             });
@@ -2137,49 +2430,44 @@ function exportInteractionVectors() {
                 binaryStr += String.fromCharCode(bytes[i]);
             }
             vectorData = btoa(binaryStr);
-            
+
         } else if (format === "sparse") {
             const indices = Array.from(set)
-                .map(agentId => {
-                    if (typeof agentId === 'string') {
-                        return parseInt(agentId.replace("agent_", ""), 10);
-                    }
-                    return parseInt(agentId, 10);
-                })
-                .filter(idx => !isNaN(idx))
+                .map(agentId => parsePersonIndex(agentId))
+                .filter(idx => idx !== null)
                 .sort((a, b) => a - b);
             vectorData = indices.join(';');
         }
-        
+
         rows.push([
             `"${panel.name}"`,
             `"${format}"`,
             `"${vectorData}"`
         ]);
     });
-    
+
     const metadata = [
         `# Westfield Newmarket Pedestrian Gravity Simulation - Raw Exposure Vectors`,
         `# Export Date: ${new Date().toISOString()}`,
-        `# Total Agents: ${numAgents.toLocaleString()}`,
+        `# Total Weekly Unique People: ${numAgents.toLocaleString()}`,
         `# Vector Format: ${format}`,
         `# Note: Sparse indices are separated by semicolons (;) to preserve CSV columns.`,
         `#`
     ];
-    
+
     const csvContent = metadata.concat([headers.join(",")])
                                .concat(rows.map(row => row.join(",")))
                                .join("\n");
-                               
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    
+
     const dateStr = new Date().toISOString().slice(0, 10);
     const timeStr = new Date().toTimeString().slice(0, 8).replace(/:/g, "-");
     link.setAttribute("download", `westfield_newmarket_panel_vectors_${format}_${dateStr}_${timeStr}.csv`);
-    
+
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -2204,19 +2492,19 @@ window.addEventListener("DOMContentLoaded", () => {
             `;
         }
     }
-    
+
     bindUIControls();
-    
+
     // 2. Load panel list CSV and network graph asynchronously
     const promises = [loadPanels(), loadGraph()];
     if (isLeafletLoaded) {
         promises.push(loadGeoJSON());
     }
-    
+
     Promise.all(promises).then(() => {
         console.log("Initialization Complete. Headless Engine Ready.");
         renderPanelsSelectionGrid();
-        
+
         // Start precomputation in background so that there's no lag when running
         setTimeout(precomputePaths, 200);
     }).catch(err => {
@@ -2233,3 +2521,33 @@ window.addEventListener("DOMContentLoaded", () => {
         }
     });
 });
+
+// ponytail: self-check only; upgrade path = dedicated test file if logic grows
+(function selfCheckWeeklyFootfall() {
+    const counts = getDailyTripCounts();
+    console.assert(
+        counts.reduce((a, b) => a + b, 0) === weeklyVisitsTotal,
+        "daily trip counts must sum to weeklyVisitsTotal"
+    );
+    const plan = buildWeeklyTripAssignments(weeklyVisitsTotal, weeklyUniquePool);
+    console.assert(
+        plan.length === weeklyVisitsTotal,
+        "trip assignment plan length must match weekly visits"
+    );
+    if (weeklyVisitsTotal >= weeklyUniquePool) {
+        console.assert(
+            new Set(plan).size === weeklyUniquePool,
+            "trip plan must cover every unique pool member once"
+        );
+    }
+    const mockA = { crossedAgents: new Set(["person_1", "person_2", "person_3"]) };
+    const mockB = { crossedAgents: new Set(["person_2", "person_3", "person_4", "person_5"]) };
+    const coef = getPanelSimilarity(mockA, mockB, "overlap_coef");
+    console.assert(getStoreCategory("ArchieBros_lv3_entry-exit") === "archiebrothers", "ArchieBros category mapping");
+    console.assert(getStoreCategory("RS_lv3_entry-exit") === "rebelsport", "Rebel Sport category mapping");
+    categoryShopCounts = { specialty: 33, woolworths: 1, foodcourt: 1 };
+    const specialtyPull = categoryWeights.specialty / 33;
+    const woolworthsPull = categoryWeights.woolworths / 1;
+    const specialtyShare = specialtyPull / (specialtyPull + woolworthsPull + categoryWeights.foodcourt);
+    console.assert(specialtyShare < 0.15, "normalized weights should not let specialty dominate");
+})();

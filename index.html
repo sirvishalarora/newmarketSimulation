@@ -27,7 +27,7 @@
                     <a href="panel_editor.html" class="btn btn-sm btn-secondary" style="text-decoration: none; display: inline-block; width: 100%;">✏️ Edit Panel Locations</a>
                 </div>
             </div>
-            
+
             <div class="sidebar-content">
                 <!-- Simulation Config Section -->
                 <div class="section">
@@ -35,14 +35,28 @@
                         <span class="icon">⚙️</span>
                         <h2>Global Parameters</h2>
                     </div>
-                    
-                    <!-- Total Agents -->
+
+                    <!-- Weekly Footfall Model -->
                     <div class="control-group">
                         <div class="control-label">
-                            <span>Total Agents</span>
-                            <span class="control-val" id="val-total-agents">50,000</span>
+                            <span>Weekly Visits (non-unique)</span>
+                            <span class="control-val" id="val-weekly-visits">200,000</span>
                         </div>
-                        <input type="range" id="input-total-agents" min="1000" max="300000" value="50000" step="1000" />
+                        <input type="range" id="input-weekly-visits" min="50000" max="500000" value="200000" step="5000" />
+                        <span class="help-text">Total person-trips over 7 days (advertising audience; excludes under-15).</span>
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Weekly Unique People</span>
+                            <span class="control-val" id="val-weekly-uniques">123,000</span>
+                        </div>
+                        <input type="range" id="input-weekly-uniques" min="50000" max="300000" value="123000" step="1000" />
+                        <span class="help-text">Distinct ad-eligible visitors (~1.63 visits/person at 200k trips).</span>
+                    </div>
+
+                    <div class="daily-weights-preview" id="daily-weights-preview" style="font-size: 10px; color: #64748b; line-height: 1.5; margin-top: 4px;">
+                        Profile A daily split: Mon 11% · Tue 12% · Wed 13% · Thu 14.5% · Fri 16.5% · Sat 19.5% · Sun 13.5%
                     </div>
 
                     <!-- Min/Max Visits -->
@@ -53,7 +67,7 @@
                         </div>
                         <input type="range" id="input-min-visits" min="1" max="10" value="2" step="1" />
                     </div>
-                    
+
                     <div class="control-group">
                         <div class="control-label">
                             <span>Max Shop Visits</span>
@@ -91,29 +105,30 @@
 
                     <!-- Attractiveness Weights -->
                     <div class="category-weights-title">Store Category Attractiveness</div>
-                    
+                    <span class="help-text" style="display: block; margin-bottom: 10px;">Each slider sets total pull for that store type, split evenly across its shop nodes in the graph.</span>
+
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>Farmers (Anchor)</span>
-                            <span class="control-val" id="val-wt-farmers">45%</span>
+                            <span class="control-val" id="val-wt-farmers">60%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="45" />
+                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="60" />
                     </div>
 
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>David Jones (Anchor)</span>
-                            <span class="control-val" id="val-wt-davidjones">16%</span>
+                            <span class="control-val" id="val-wt-davidjones">45%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="16" />
+                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="45" />
                     </div>
 
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>H&M (Anchor)</span>
-                            <span class="control-val" id="val-wt-hm">26%</span>
+                            <span class="control-val" id="val-wt-hm">35%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="26" />
+                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="35" />
                     </div>
 
                     <div class="control-group wt-group">
@@ -135,17 +150,17 @@
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>Food Court / Dining</span>
-                            <span class="control-val" id="val-wt-foodcourt">78%</span>
+                            <span class="control-val" id="val-wt-foodcourt">75%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="78" />
+                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="75" />
                     </div>
 
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>Noel Leeming</span>
-                            <span class="control-val" id="val-wt-noelleeming">40%</span>
+                            <span class="control-val" id="val-wt-noelleeming">30%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-noelleeming" min="0" max="100" value="40" />
+                        <input type="range" class="wt-slider" id="wt-noelleeming" min="0" max="100" value="30" />
                     </div>
 
                     <div class="control-group wt-group">
@@ -159,17 +174,72 @@
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>Rebel Sport</span>
-                            <span class="control-val" id="val-wt-rebelsport">40%</span>
+                            <span class="control-val" id="val-wt-rebelsport">35%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-rebelsport" min="0" max="100" value="40" />
+                        <input type="range" class="wt-slider" id="wt-rebelsport" min="0" max="100" value="35" />
                     </div>
 
                     <div class="control-group wt-group">
                         <div class="control-label">
                             <span>Specialty Retail</span>
-                            <span class="control-val" id="val-wt-specialty">50%</span>
+                            <span class="control-val" id="val-wt-specialty">12%</span>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="50" />
+                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="12" />
+                    </div>
+                </div>
+
+                <!-- Segment-Choice Routing -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">🧭</span>
+                        <h2>Corridor Routing</h2>
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Walking Route Model</span>
+                        </div>
+                        <select id="input-routing-mode" class="routing-mode-select">
+                            <option value="shortest">Shortest path (Dijkstra)</option>
+                            <option value="segment_logit" selected>Segment choice (logit)</option>
+                        </select>
+                        <span class="help-text">Segment choice picks the next corridor step toward the shop instead of locking to one shortest path.</span>
+                    </div>
+
+                    <div id="segment-logit-controls">
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Progress Beta (β)</span>
+                                <span class="control-val" id="val-route-beta">0.08</span>
+                            </div>
+                            <input type="range" id="input-route-beta" min="0.01" max="0.30" value="0.08" step="0.01" />
+                            <span class="help-text">Lower = more detours; higher = closer to shortest path.</span>
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Route Randomness (σ)</span>
+                                <span class="control-val" id="val-route-randomness">1.0</span>
+                            </div>
+                            <input type="range" id="input-route-randomness" min="0.0" max="3.0" value="1.0" step="0.1" />
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Escalator Zone Boost</span>
+                                <span class="control-val" id="val-route-zone-boost">0.35</span>
+                            </div>
+                            <input type="range" id="input-route-zone-boost" min="0.0" max="1.5" value="0.35" step="0.05" />
+                            <span class="help-text">Extra pull for corridor nodes within 15m of escalator_lv2_4 (L2 panel branch).</span>
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Vertical Link Beta</span>
+                                <span class="control-val" id="val-route-vertical">0.5</span>
+                            </div>
+                            <input type="range" id="input-route-vertical" min="0.0" max="2.0" value="0.5" step="0.1" />
+                        </div>
                     </div>
                 </div>
 
@@ -288,7 +358,7 @@
                             <h3 class="loader-title">Computing Pedestrian Flows</h3>
                             <p class="loader-status" id="running-status-text">Precomputing paths...</p>
                             <div class="loader-substats" id="running-substats">
-                                Agents: 0 / 50,000
+                                Trips: 0 / 250,000
                             </div>
                         </div>
                     </div>
@@ -299,7 +369,7 @@
                             <button class="result-tab active" id="btn-tab-coverage">Exposure Coverage</button>
                             <button class="result-tab" id="btn-tab-similarity">Sensor Similarity</button>
                         </div>
-                        
+
                         <!-- Tab 1: Coverage Metrics -->
                         <div id="tab-content-coverage" class="tab-content active-content">
                             <div class="results-stats-body" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 15px;">
@@ -308,37 +378,38 @@
                                     <span class="value neon-green" id="coverage-rate">0.00%</span>
                                 </div>
                                 <div class="result-metric-item">
-                                    <span class="label">Unique Crossed</span>
+                                    <span class="label">Weekly Unique Reach</span>
                                     <span class="value neon-pink" id="unique-cross-count">0</span>
                                 </div>
                                 <div class="result-metric-item">
-                                    <span class="label">Total Detections</span>
+                                    <span class="label">Total Contacts</span>
                                     <span class="value neon-purple" id="res-total-crossings">0</span>
                                 </div>
                                 <div class="result-metric-item">
-                                    <span class="label">Simulated Agents</span>
+                                    <span class="label">Weekly Trips Simulated</span>
                                     <span class="value neon-cyan" id="res-total-agents">0</span>
                                 </div>
                             </div>
                         </div>
-                        
+
                         <!-- Tab 2: Panel Similarity -->
                         <div id="tab-content-similarity" class="tab-content" style="display: none; flex: 1; flex-direction: column; justify-content: space-between; margin-top: 15px;">
                             <!-- Metric Selector -->
                             <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
                                 <label style="font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600;">Metric:</label>
                                 <select id="similarity-metric-select" class="similarity-select" style="flex: 1; padding: 4px 8px; font-size: 12px;">
+                                    <option value="overlap_coef" selected>Overlap Coef (shared / min reach)</option>
                                     <option value="jaccard">Jaccard Similarity</option>
                                     <option value="cosine">Cosine Similarity</option>
                                     <option value="overlap">Raw Overlap Count</option>
                                 </select>
                             </div>
-                            
+
                             <!-- Reference status -->
                             <div class="reference-panel-status" id="ref-panel-status" style="margin: 4px 0 8px 0; padding: 6px 10px;">
                                 <span class="text-muted" style="font-size: 11px; text-align: center; width: 100%;">Click map sensor or row to select reference</span>
                             </div>
-                            
+
                             <!-- Detailed Comparison dropdowns & Venn bar -->
                             <div class="detailed-comparison-card" style="padding: 10px; margin-top: 0;">
                                 <div class="comparison-selectors" style="margin-bottom: 8px; gap: 6px;">
@@ -382,7 +453,7 @@
                             <input type="text" id="panel-search" placeholder="Search panels by ID..." />
                         </div>
                     </div>
-                    
+
                     <div class="panels-grid-container" id="panels-selection-grid">
                         <div class="loading-placeholder">
                             <div class="spinner"></div>
@@ -419,7 +490,7 @@
                                 <canvas id="chart-store-visits"></canvas>
                             </div>
                         </div>
-                        
+
                         <div class="chart-card glass-card">
                             <h3>Exposure Coverage by Floor</h3>
                             <div class="chart-container">
@@ -453,8 +524,9 @@
                                         <th>Orientation</th>
                                         <th>Coordinates</th>
                                         <th style="width: 100px; text-align: center;">Active</th>
-                                        <th style="text-align: right;">Unique Crossed</th>
-                                        <th style="text-align: right; width: 180px;">Exposure Efficiency</th>
+                                        <th style="text-align: right;">Unique Reach</th>
+                                        <th style="text-align: right;">Contacts</th>
+                                        <th style="text-align: right; width: 160px;">Exposure Efficiency</th>
                                     </tr>
                                 </thead>
                                 <tbody id="leaderboard-tbody">
