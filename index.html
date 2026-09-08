@@ -3,92 +3,258 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Westfield Newmarket People Movement Simulation</title>
+    <title>Westfield Newmarket Pedestrian Gravity Simulation Portal</title>
     <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="leaflet.css" />
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="chart.js"></script>
     <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css" />
 </head>
 <body>
     <div class="app-container">
         <!-- Sidebar Controls -->
-        <div class="sidebar">
+        <aside class="sidebar">
             <div class="sidebar-header">
                 <h1>Westfield Newmarket</h1>
-                <p>Auckland, NZ • Pedestrian Simulation</p>
-            </div>
-            
-            <div class="sidebar-content">
-                <!-- Controls Section -->
-                <div class="section">
-                    <div class="section-title">
-                        Control Console
-                        <span id="sim-status">Paused</span>
-                    </div>
-                    
-                    <div class="sim-actions">
-                        <button id="btn-start" class="btn btn-primary">Start Simulation</button>
-                        <button id="btn-reset" class="btn btn-danger">Reset</button>
-                    </div>
+                <p class="subtitle">Pedestrian Gravity Simulation Portal</p>
+                <div class="version-badge">HEADLESS MAP V2.0</div>
+                <div class="nav-links" style="margin-top: 10px; display: flex; gap: 8px;">
+                    <a href="panel_editor.html" class="btn btn-sm btn-secondary" style="text-decoration: none; display: inline-block; width: 100%;">✏️ Edit Panel Locations</a>
                 </div>
+            </div>
 
+            <div class="sidebar-content">
                 <!-- Simulation Config Section -->
                 <div class="section">
-                    <div class="section-title">Global Settings</div>
-                    
-                    <!-- Algorithm Select -->
-                    <div class="control-group">
-                        <div class="control-label">
-                            Routing Algorithm
-                        </div>
-                        <select id="select-algo">
-                            <option value="goal_oriented">Goal-Oriented (Shortest Path)</option>
-                            <option value="gravity">Gravity Choice Model</option>
-                            <option value="random">Random Walk</option>
-                        </select>
-                    </div>
-                    
-                    <!-- Sim Speed -->
-                    <div class="control-group">
-                        <div class="control-label">
-                            Simulation Speed
-                            <span class="control-val" id="val-sim-speed">5x</span>
-                        </div>
-                        <input type="range" id="input-sim-speed" min="1" max="20" value="5" />
+                    <div class="section-header">
+                        <span class="icon">⚙️</span>
+                        <h2>Global Parameters</h2>
                     </div>
 
-                    <!-- Max Agents -->
+                    <!-- Weekly Footfall Model -->
                     <div class="control-group">
                         <div class="control-label">
-                            Max Active Agents
-                            <span class="control-val" id="val-max-agents">200</span>
+                            <span>Weekly Visits (non-unique)</span>
+                            <span class="control-val" id="val-weekly-visits">200,000</span>
                         </div>
-                        <input type="range" id="input-max-agents" min="10" max="500" value="200" step="10" />
+                        <input type="range" id="input-weekly-visits" min="50000" max="500000" value="200000" step="5000" />
+                        <span class="help-text">Total person-trips over 7 days (advertising audience; excludes under-15).</span>
                     </div>
-                    
-                    <!-- Spawn Rate -->
+
                     <div class="control-group">
                         <div class="control-label">
-                            Spawn Rate (agents/min)
-                            <span class="control-val" id="val-spawn-rate">60</span>
+                            <span>Weekly Unique People</span>
+                            <span class="control-val" id="val-weekly-uniques">123,000</span>
                         </div>
-                        <input type="range" id="input-spawn-rate" min="5" max="300" value="60" step="5" />
+                        <input type="range" id="input-weekly-uniques" min="50000" max="300000" value="123000" step="1000" />
+                        <span class="help-text">Distinct ad-eligible visitors (~1.63 visits/person at 200k trips).</span>
+                    </div>
+
+                    <div class="daily-weights-preview" id="daily-weights-preview" style="font-size: 10px; color: #64748b; line-height: 1.5; margin-top: 4px;">
+                        Profile A daily split: Mon 11% · Tue 12% · Wed 13% · Thu 14.5% · Fri 16.5% · Sat 19.5% · Sun 13.5%
+                    </div>
+
+                    <!-- Min/Max Visits -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Min Shop Visits</span>
+                            <span class="control-val" id="val-min-visits">2</span>
+                        </div>
+                        <input type="range" id="input-min-visits" min="1" max="10" value="2" step="1" />
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Max Shop Visits</span>
+                            <span class="control-val" id="val-max-visits">4</span>
+                        </div>
+                        <input type="range" id="input-max-visits" min="1" max="10" value="4" step="1" />
                     </div>
 
                     <!-- Walking Speed -->
                     <div class="control-group">
                         <div class="control-label">
-                            Base Speed (m/s)
-                            <span class="control-val" id="val-walk-speed">1.3</span>
+                            <span>Base Walking Speed (m/s)</span>
+                            <span class="control-val" id="val-walk-speed">1.3 m/s</span>
                         </div>
                         <input type="range" id="input-walk-speed" min="0.5" max="3.0" value="1.3" step="0.1" />
+                    </div>
+                </div>
+
+                <!-- Gravity Model Config -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">🌌</span>
+                        <h2>Huff Gravity Choice Model</h2>
+                    </div>
+
+                    <!-- Distance Decay Exponent -->
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Distance Decay Exponent (α)</span>
+                            <span class="control-val" id="val-decay-exponent">1.3</span>
+                        </div>
+                        <input type="range" id="input-decay-exponent" min="0.5" max="3.0" value="1.3" step="0.1" />
+                        <span class="help-text">Higher α limits agents to nearby shops; lower α encourages traveling across the mall.</span>
+                    </div>
+
+                    <!-- Attractiveness Weights -->
+                    <div class="category-weights-title">Store Category Attractiveness</div>
+                    <span class="help-text" style="display: block; margin-bottom: 10px;">Each slider sets total pull for that store type, split evenly across its shop nodes in the graph.</span>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Farmers (Anchor)</span>
+                            <span class="control-val" id="val-wt-farmers">60%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="60" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>David Jones (Anchor)</span>
+                            <span class="control-val" id="val-wt-davidjones">45%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="45" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>H&M (Anchor)</span>
+                            <span class="control-val" id="val-wt-hm">35%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="35" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Woolworths (Supermarket)</span>
+                            <span class="control-val" id="val-wt-woolworths">70%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-woolworths" min="0" max="100" value="70" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>JB Hi-Fi / Electronics</span>
+                            <span class="control-val" id="val-wt-jbhifi">30%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-jbhifi" min="0" max="100" value="30" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Food Court / Dining</span>
+                            <span class="control-val" id="val-wt-foodcourt">75%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="75" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Noel Leeming</span>
+                            <span class="control-val" id="val-wt-noelleeming">30%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-noelleeming" min="0" max="100" value="30" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Archie Brothers</span>
+                            <span class="control-val" id="val-wt-archiebrothers">35%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-archiebrothers" min="0" max="100" value="35" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Rebel Sport</span>
+                            <span class="control-val" id="val-wt-rebelsport">35%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-rebelsport" min="0" max="100" value="35" />
+                    </div>
+
+                    <div class="control-group wt-group">
+                        <div class="control-label">
+                            <span>Specialty Retail</span>
+                            <span class="control-val" id="val-wt-specialty">12%</span>
+                        </div>
+                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="12" />
+                    </div>
+                </div>
+
+                <!-- Segment-Choice Routing -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">🧭</span>
+                        <h2>Corridor Routing</h2>
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-label">
+                            <span>Walking Route Model</span>
+                        </div>
+                        <select id="input-routing-mode" class="routing-mode-select">
+                            <option value="shortest">Shortest path (Dijkstra)</option>
+                            <option value="segment_logit" selected>Segment choice (logit)</option>
+                        </select>
+                        <span class="help-text">Segment choice picks the next corridor step toward the shop instead of locking to one shortest path.</span>
+                    </div>
+
+                    <div id="segment-logit-controls">
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Progress Beta (β)</span>
+                                <span class="control-val" id="val-route-beta">0.08</span>
+                            </div>
+                            <input type="range" id="input-route-beta" min="0.01" max="0.30" value="0.08" step="0.01" />
+                            <span class="help-text">Lower = more detours; higher = closer to shortest path.</span>
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Route Randomness (σ)</span>
+                                <span class="control-val" id="val-route-randomness">1.0</span>
+                            </div>
+                            <input type="range" id="input-route-randomness" min="0.0" max="3.0" value="1.0" step="0.1" />
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Escalator Zone Boost</span>
+                                <span class="control-val" id="val-route-zone-boost">0.35</span>
+                            </div>
+                            <input type="range" id="input-route-zone-boost" min="0.0" max="1.5" value="0.35" step="0.05" />
+                            <span class="help-text">Extra pull for corridor nodes within 15m of escalator_lv2_4 (L2 panel branch).</span>
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Vertical Link Beta</span>
+                                <span class="control-val" id="val-route-vertical">0.5</span>
+                            </div>
+                            <input type="range" id="input-route-vertical" min="0.0" max="2.0" value="0.5" step="0.1" />
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detection Corridor Config -->
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">👁️</span>
+                        <h2>Panel Detection Cone</h2>
                     </div>
 
                     <!-- Max Viewing Distance -->
                     <div class="control-group">
                         <div class="control-label">
-                            Max Viewing Dist (m)
-                            <span class="control-val" id="val-view-dist">15</span>
+                            <span>Max Viewing Distance (m)</span>
+                            <span class="control-val" id="val-view-dist">15m</span>
                         </div>
                         <input type="range" id="input-view-dist" min="5" max="30" value="15" step="1" />
                     </div>
@@ -96,32 +262,15 @@
                     <!-- Viewing Cone Angle -->
                     <div class="control-group">
                         <div class="control-label">
-                            Viewing Cone Angle (°)
+                            <span>Viewing Cone Angle (°)</span>
                             <span class="control-val" id="val-cone-angle">60°</span>
                         </div>
                         <input type="range" id="input-cone-angle" min="15" max="90" value="60" step="5" />
                     </div>
-                </div>
 
-                <!-- Visualization Toggles -->
-                <div class="section">
-                    <div class="section-title">Overlay Elements</div>
-                    <div class="toggle-group">
-                        <div class="toggle-label">Render Walk Paths</div>
-                        <label class="switch">
-                            <input type="checkbox" id="chk-show-paths" checked>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="toggle-group">
-                        <div class="toggle-label">Render Viewing Cones</div>
-                        <label class="switch">
-                            <input type="checkbox" id="chk-show-cones" checked>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="toggle-group">
-                        <div class="toggle-label">Render Network Graph</div>
+                    <!-- Visibility check for network graph -->
+                    <div class="graph-toggle-group">
+                        <span class="label-graph-chk">Show Network Graph Links</span>
                         <label class="switch">
                             <input type="checkbox" id="chk-show-graph">
                             <span class="slider"></span>
@@ -129,117 +278,271 @@
                     </div>
                 </div>
 
-                <!-- Attractiveness Weights -->
+                <!-- Profile Configuration -->
                 <div class="section">
-                    <div class="section-title">Destination Weights</div>
-                    
-                    <div class="control-group">
-                        <div class="control-label">
-                            Farmers (Anchor)
-                            <span class="control-val" id="val-wt-farmers">90%</span>
+                    <div class="section-header">
+                        <span class="icon">💾</span>
+                        <h2>Profile Configuration</h2>
+                    </div>
+                    <div class="sidebar-actions" style="margin-top: 10px; display: flex; gap: 8px; padding: 0;">
+                        <button id="btn-export-config" class="btn btn-sm btn-secondary" style="flex: 1; padding: 8px 4px; font-size: 11px;">Export JSON</button>
+                        <button id="btn-import-config-trigger" class="btn btn-sm btn-secondary" style="flex: 1; padding: 8px 4px; font-size: 11px;">Import JSON</button>
+                        <input type="file" id="input-import-config" accept=".json" style="display: none;" />
+                    </div>
+                </div>
+
+                <!-- Simulation Execution Trigger -->
+                <div class="sidebar-actions">
+                    <button id="btn-run" class="btn btn-primary btn-glow">Execute Simulation</button>
+                    <button id="btn-reset" class="btn btn-danger" disabled>Reset System</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- TOP ROW GRID: Map on the left, Configuration / Stats summary on the right -->
+            <div class="top-row-grid">
+                <!-- Map visualizer card -->
+                <div class="map-card glass-card">
+                    <div id="map"></div>
+                    <!-- Floor switcher overlay inside the map container -->
+                    <div class="floor-selector">
+                        <button class="floor-btn active" data-floor="1">Level 1</button>
+                        <button class="floor-btn" data-floor="2">Level 2</button>
+                        <button class="floor-btn" data-floor="3">Level 3</button>
+                    </div>
+                </div>
+
+                <!-- Right Side Status wrapper -->
+                <div class="status-card-wrapper">
+                    <!-- SETUP STATE: Panel stats -->
+                    <div id="state-setup-stats" class="card-inner fade-in">
+                        <div class="card-inner-header">
+                            <h2>Panel Configuration</h2>
+                            <p class="subtitle">Select active sensors for exposure checks</p>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-farmers" min="0" max="100" value="90" />
+                        <div class="setup-stats-body">
+                            <div class="large-stats-pill">
+                                <span id="panels-selected-count">0</span>
+                                <span class="divider">/</span>
+                                <span id="panels-total-count">0</span>
+                                <p class="label-desc">Active Panels</p>
+                            </div>
+                            <div class="setup-actions-grid">
+                                <button id="btn-select-all" class="btn btn-sm btn-secondary">Select All</button>
+                                <button id="btn-select-none" class="btn btn-sm btn-secondary">Select None</button>
+                                <button id="btn-select-fl1" class="btn btn-sm btn-secondary">Floor 1 Only</button>
+                                <button id="btn-select-fl2" class="btn btn-sm btn-secondary">Floor 2 Only</button>
+                                <button id="btn-select-fl3" class="btn btn-sm btn-secondary">Floor 3 Only</button>
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            David Jones (Anchor)
-                            <span class="control-val" id="val-wt-davidjones">90%</span>
+                    <!-- RUNNING STATE: Progress -->
+                    <div id="state-running" class="card-inner fade-in" style="display: none;">
+                        <div class="loader-content">
+                            <div class="glowing-spinner-container">
+                                <svg class="progress-ring" width="120" height="120">
+                                    <circle class="progress-ring-bg" stroke="rgba(255, 255, 255, 0.05)" stroke-width="6" fill="transparent" r="50" cx="60" cy="60" />
+                                    <circle class="progress-ring-fill" id="running-progress-circle" stroke="url(#cyan-gradient)" stroke-width="6" fill="transparent" r="50" cx="60" cy="60" stroke-linecap="round" />
+                                    <defs>
+                                        <linearGradient id="cyan-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                            <stop offset="0%" stop-color="#06b6d4" />
+                                            <stop offset="100%" stop-color="#8b5cf6" />
+                                        </linearGradient>
+                                    </defs>
+                                </svg>
+                                <div class="progress-percentage" id="running-progress-percent">0%</div>
+                            </div>
+                            <h3 class="loader-title">Computing Pedestrian Flows</h3>
+                            <p class="loader-status" id="running-status-text">Precomputing paths...</p>
+                            <div class="loader-substats" id="running-substats">
+                                Trips: 0 / 250,000
+                            </div>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-davidjones" min="0" max="100" value="90" />
                     </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            H&M (Anchor)
-                            <span class="control-val" id="val-wt-hm">70%</span>
+                    <!-- RESULTS STATE: Executive summary metrics -->
+                    <div id="state-results-summary" class="card-inner fade-in" style="display: none;">
+                        <div class="card-inner-header-tabs">
+                            <button class="result-tab active" id="btn-tab-coverage">Exposure Coverage</button>
+                            <button class="result-tab" id="btn-tab-similarity">Sensor Similarity</button>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-hm" min="0" max="100" value="70" />
-                    </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            Woolworths (Supermarket)
-                            <span class="control-val" id="val-wt-woolworths">80%</span>
+                        <!-- Tab 1: Coverage Metrics -->
+                        <div id="tab-content-coverage" class="tab-content active-content">
+                            <div class="results-stats-body" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 15px;">
+                                <div class="result-metric-item">
+                                    <span class="label">Coverage Rate</span>
+                                    <span class="value neon-green" id="coverage-rate">0.00%</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Weekly Unique Reach</span>
+                                    <span class="value neon-pink" id="unique-cross-count">0</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Total Contacts</span>
+                                    <span class="value neon-purple" id="res-total-crossings">0</span>
+                                </div>
+                                <div class="result-metric-item">
+                                    <span class="label">Weekly Trips Simulated</span>
+                                    <span class="value neon-cyan" id="res-total-agents">0</span>
+                                </div>
+                            </div>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-woolworths" min="0" max="100" value="80" />
-                    </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            JB Hi-Fi / Electronics
-                            <span class="control-val" id="val-wt-jbhifi">85%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-jbhifi" min="0" max="100" value="85" />
-                    </div>
+                        <!-- Tab 2: Panel Similarity -->
+                        <div id="tab-content-similarity" class="tab-content" style="display: none; flex: 1; flex-direction: column; justify-content: space-between; margin-top: 15px;">
+                            <!-- Metric Selector -->
+                            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
+                                <label style="font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600;">Metric:</label>
+                                <select id="similarity-metric-select" class="similarity-select" style="flex: 1; padding: 4px 8px; font-size: 12px;">
+                                    <option value="overlap_coef" selected>Overlap Coef (shared / min reach)</option>
+                                    <option value="jaccard">Jaccard Similarity</option>
+                                    <option value="cosine">Cosine Similarity</option>
+                                    <option value="overlap">Raw Overlap Count</option>
+                                </select>
+                            </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            Food Court / Dining
-                            <span class="control-val" id="val-wt-foodcourt">95%</span>
-                        </div>
-                        <input type="range" class="wt-slider" id="wt-foodcourt" min="0" max="100" value="95" />
-                    </div>
+                            <!-- Reference status -->
+                            <div class="reference-panel-status" id="ref-panel-status" style="margin: 4px 0 8px 0; padding: 6px 10px;">
+                                <span class="text-muted" style="font-size: 11px; text-align: center; width: 100%;">Click map sensor or row to select reference</span>
+                            </div>
 
-                    <div class="control-group">
-                        <div class="control-label">
-                            Specialty Retail
-                            <span class="control-val" id="val-wt-specialty">30%</span>
+                            <!-- Detailed Comparison dropdowns & Venn bar -->
+                            <div class="detailed-comparison-card" style="padding: 10px; margin-top: 0;">
+                                <div class="comparison-selectors" style="margin-bottom: 8px; gap: 6px;">
+                                    <select id="compare-panel-a" class="similarity-select" style="padding: 4px 6px; font-size: 11px;"></select>
+                                    <span class="vs-text" style="font-size: 10px;">VS</span>
+                                    <select id="compare-panel-b" class="similarity-select" style="padding: 4px 6px; font-size: 11px;"></select>
+                                </div>
+                                <div id="comparison-results" class="comparison-results-container">
+                                    <div class="no-selection-msg" style="padding: 4px 0; font-size: 10px;">Select two sensors to compare</div>
+                                </div>
+                            </div>
+
+                            <!-- Raw Vector Export -->
+                            <div class="vector-export-card" style="margin-top: 10px; padding: 10px; border-top: 1px solid var(--border-color);">
+                                <div style="font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 600; margin-bottom: 6px;">Raw Exposure Vector Export</div>
+                                <div style="display: flex; gap: 6px; align-items: center;">
+                                    <select id="select-vector-format" class="similarity-select" style="flex: 1.2; padding: 4px 6px; font-size: 11px;">
+                                        <option value="binary">Binary String (00110...)</option>
+                                        <option value="base64">Base64 Compressed Bits</option>
+                                        <option value="sparse">Sparse Indices (3,5,10...)</option>
+                                    </select>
+                                    <button id="btn-export-vectors" class="btn btn-sm btn-primary" style="flex: 1; padding: 4px 8px; font-size: 11px;">Export Data</button>
+                                </div>
+                            </div>
                         </div>
-                        <input type="range" class="wt-slider" id="wt-specialty" min="0" max="100" value="30" />
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Floor Selector Overlay -->
-        <div class="floor-selector">
-            <button class="floor-btn active" data-floor="1">Level 1</button>
-            <button class="floor-btn" data-floor="2">Level 2</button>
-            <button class="floor-btn" data-floor="3">Level 3</button>
-        </div>
+            <!-- BOTTOM SECTION: Search/Filters & Panels grid OR Charts & Table -->
+            <div class="bottom-section">
+                <!-- SETUP STATE: Panel grid list -->
+                <div id="state-setup-list" class="card glass-card fade-in">
+                    <div class="card-header border-bottom">
+                        <div>
+                            <h2>Panel Selection List</h2>
+                            <p class="subtitle">Search, filter, and toggle sensors visible on the map</p>
+                        </div>
+                        <div class="search-wrapper">
+                            <span class="search-icon">🔍</span>
+                            <input type="text" id="panel-search" placeholder="Search panels by ID..." />
+                        </div>
+                    </div>
 
-        <!-- Interactive Map Container -->
-        <div class="map-container">
-            <div id="map"></div>
-        </div>
+                    <div class="panels-grid-container" id="panels-selection-grid">
+                        <div class="loading-placeholder">
+                            <div class="spinner"></div>
+                            <p>Loading Panel Locations...</p>
+                        </div>
+                    </div>
+                </div>
 
-        <!-- Stats and Panel Detection Panel (Right Floating Panel) -->
-        <div class="stats-panel">
-            <div class="stats-panel-header">
-                <h2>Simulation Metrics</h2>
-                <div class="pulse-dot"></div>
+                <!-- COMPLETED STATE: Analytics charts & tables -->
+                <div id="state-results-details" class="fade-in" style="display: none;">
+                    <!-- Speed Performance banner -->
+                    <div class="performance-banner glass-card">
+                        <div class="perf-item">
+                            <span class="icon">⚡</span>
+                            <div>
+                                <span class="title">Throughput</span>
+                                <span class="val" id="res-speed-throughput">0 agents/s</span>
+                            </div>
+                        </div>
+                        <div class="perf-item">
+                            <span class="icon">⏱️</span>
+                            <div>
+                                <span class="title">Compute Time</span>
+                                <span class="val" id="res-elapsed-time">0ms</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Charts row -->
+                    <div class="charts-row">
+                        <div class="chart-card glass-card">
+                            <h3>Shop Visits by Store Category (Gravity Choice)</h3>
+                            <div class="chart-container">
+                                <canvas id="chart-store-visits"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="chart-card glass-card">
+                            <h3>Exposure Coverage by Floor</h3>
+                            <div class="chart-container">
+                                <canvas id="chart-floor-crossings"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Leaderboard card -->
+                    <div class="card glass-card leaderboard-card">
+                        <div class="card-header border-bottom">
+                            <div>
+                                <h2>Panel Performance Leaderboard</h2>
+                                <p class="subtitle">Interactive list. Deselect checkboxes to update exposure coverage dynamically.</p>
+                            </div>
+                            <div class="table-actions">
+                                <input type="text" id="leaderboard-search" placeholder="Search leaderboard..." />
+                                <button id="btn-leaderboard-select-all" class="btn btn-sm btn-secondary">Select All</button>
+                                <button id="btn-leaderboard-select-none" class="btn btn-sm btn-secondary">Select None</button>
+                                <button id="btn-export-csv" class="btn btn-sm btn-primary">Export CSV</button>
+                            </div>
+                        </div>
+
+                        <div class="table-container">
+                            <table class="leaderboard-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 80px;">Rank</th>
+                                        <th>Panel ID</th>
+                                        <th>Floor</th>
+                                        <th>Orientation</th>
+                                        <th>Coordinates</th>
+                                        <th style="width: 100px; text-align: center;">Active</th>
+                                        <th style="text-align: right;">Unique Reach</th>
+                                        <th style="text-align: right;">Contacts</th>
+                                        <th style="text-align: right; width: 160px;">Exposure Efficiency</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="leaderboard-tbody">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
-
-            <div class="stat-grid">
-                <div class="stat-card">
-                    <div class="stat-card-title">Total Spawns</div>
-                    <div class="stat-card-val neon-purple" id="stat-total-spawns">0</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-card-title">Active Agents</div>
-                    <div class="stat-card-val neon-blue" id="stat-active-agents">0</div>
-                </div>
-            </div>
-
-            <!-- Detection Panels -->
-            <div class="panels-section">
-                <div class="panels-title">Detection Panels</div>
-                <div class="panel-list" id="panel-list-container">
-                    <!-- Panel list will be dynamically rendered -->
-                </div>
-
-                <div class="crossing-summary">
-                    <div class="crossing-summary-title">Unique Agents Crossed</div>
-                    <div class="crossing-summary-val" id="unique-cross-count">0</div>
-                </div>
-            </div>
-        </div>
+        </main>
     </div>
 
     <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <!-- Simulation Application Logic -->
+    <script src="leaflet.js"></script>
+    <!-- Application Script -->
     <script src="app.js"></script>
 </body>
 </html>
