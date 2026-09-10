@@ -86,8 +86,34 @@ Newmarket's positions were therefore refined by hand in `panel_editor.html`
 raw warehouse extract; `panel_locations_with_floor.csv` is the edited result
 with 54 distinct positions. Any new mall needs the same pass.
 
-> The editor and the viewer (`app.js`) are still pinned to Newmarket's topology,
-> CSV, and a fixed Level 1/2/3 control. They have not been parameterised yet.
+### Using the editor
+
+```bash
+python3 start_server.py 8000
+```
+
+Then open `http://localhost:8000/panel_editor.html?mall=albany` — omit the
+parameter for Newmarket. The sidebar has links to switch between malls.
+
+The editor resolves its files from `malls.json`, generated from the same
+registry the pipeline uses. **Regenerate it after editing `malls.py`:**
+
+```bash
+python3 malls.py
+```
+
+Floors, the floor switcher, and the map extent all come from the loaded data,
+so a new mall needs nothing configured in the page. The backdrop is whatever
+the mall has: a polygon floorplan for Newmarket, the corridor mesh with its
+named entrances, destinations and escalators for Albany.
+
+Drag markers or edit lat/lon/orientation, then **Download Updated CSV** — it
+writes `<mall>_panel_locations_<date>.csv` in the same format as the input.
+Replace the mall's `panels` file with it and re-run the simulation.
+
+> The simulation viewer (`index.html` / `app.js`) is still Newmarket-only, so
+> "Back to Simulation" always shows Newmarket regardless of the mall you were
+> editing.
 
 ## Footfall
 

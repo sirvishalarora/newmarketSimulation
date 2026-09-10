@@ -1,0 +1,25 @@
+{
+  "default": "newmarket",
+  "malls": {
+    "newmarket": {
+      "key": "newmarket",
+      "name": "Westfield Newmarket",
+      "siteId": 17056,
+      "panels": "panel_locations_with_floor.csv",
+      "backdrop": {
+        "type": "geojson",
+        "path": "Westfield_NewMarket_topology_4326.geojson"
+      }
+    },
+    "albany": {
+      "key": "albany",
+      "name": "Westfield Albany",
+      "siteId": 17055,
+      "panels": "albany_panel_locations_with_floor.csv",
+      "backdrop": {
+        "type": "graph",
+        "path": "albany_graph.json"
+      }
+    }
+  }
+}

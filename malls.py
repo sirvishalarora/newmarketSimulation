@@ -18,6 +18,7 @@ Pipeline stages and the fields each one reads:
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -144,6 +145,33 @@ def resolve(key: str) -> Mall:
         ) from None
 
 
+def browser_config() -> dict:
+    """The subset of the registry the browser tools need.
+
+    Written to malls.json so panel_editor.js and app.js resolve a mall from the
+    same source as the Python pipeline instead of hardcoding one centre's
+    filenames. Floor lists are deliberately absent: the pages derive them from
+    the backdrop and panel data they load, so a mall never has to declare its
+    floors in two places.
+    """
+    out = {}
+    for key, mall in MALLS.items():
+        # A polygon topology draws as a floorplan; a node/edge graph draws as a
+        # corridor mesh. The editor renders whichever this mall actually has.
+        if mall.csv_nodes and mall.csv_edges:
+            backdrop = {"type": "graph", "path": mall.graph}
+        else:
+            backdrop = {"type": "geojson", "path": mall.topology}
+        out[key] = {
+            "key": key,
+            "name": mall.name,
+            "siteId": mall.site_id,
+            "panels": mall.panels,
+            "backdrop": backdrop,
+        }
+    return {"default": DEFAULT_MALL, "malls": out}
+
+
 def add_mall_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--mall",
@@ -151,3 +179,22 @@ def add_mall_argument(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MALL,
         help=f"which centre to run (default: {DEFAULT_MALL})",
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Write malls.json for the browser tools to read"
+    )
+    parser.add_argument(
+        "--out", default="malls.json", help="output path (default: malls.json)"
+    )
+    args = parser.parse_args()
+    path = ROOT / args.out
+    with path.open("w") as f:
+        json.dump(browser_config(), f, indent=2)
+        f.write("\n")
+    print(f"Wrote {path.name} ({', '.join(sorted(MALLS))})")
+
+
+if __name__ == "__main__":
+    main()

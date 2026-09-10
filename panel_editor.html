@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Westfield Newmarket Panel Editor</title>
+    <title>Panel Editor</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="leaflet.css" />
     <!-- Google Fonts: Inter & Outfit -->
@@ -20,6 +20,8 @@
             <div class="sidebar-header">
                 <h1>Panel Editor</h1>
                 <p class="subtitle">Drag markers or edit values to position sensors</p>
+                <!-- Populated by initMallSwitcher() from malls.json -->
+                <div id="mall-switcher" style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;"></div>
                 <div class="nav-links" style="margin-top: 10px; display: flex; gap: 8px;">
                     <a href="index.html" class="btn btn-sm btn-secondary" style="text-decoration: none; display: inline-block; width: 100%;">📊 Back to Simulation</a>
                 </div>
@@ -45,11 +47,8 @@
                         
                         <div class="editor-field">
                             <label>Floor Level</label>
-                            <select id="edit-panel-floor">
-                                <option value="1">Level 1</option>
-                                <option value="2">Level 2</option>
-                                <option value="3">Level 3</option>
-                            </select>
+                            <!-- Options are generated in initFloors() -->
+                            <select id="edit-panel-floor"></select>
                         </div>
 
                         <div class="editor-field">
@@ -94,7 +93,7 @@
                 <div class="sidebar-actions" style="margin-top: 1.50rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
                     <button id="btn-download-csv" class="btn btn-primary btn-glow" style="width: 100%;">💾 Download Updated CSV</button>
                     <p class="help-text" style="text-align: center; margin-top: 6px;">
-                        Replace your local <b>panel_locations_with_floor.csv</b> with this file to run simulator on new positions.
+                        Replace your local <b id="csv-target-name">panel_locations_with_floor.csv</b> with this file to run simulator on new positions.
                     </p>
                 </div>
             </div>
@@ -105,11 +104,9 @@
             <div id="map" style="border-radius: 0; width: 100%; height: 100%;"></div>
             
             <!-- Floor switcher overlay inside the map container -->
-            <div class="floor-selector" style="top: 10px; left: 50px;">
-                <button class="floor-btn active" data-floor="1">Level 1</button>
-                <button class="floor-btn" data-floor="2">Level 2</button>
-                <button class="floor-btn" data-floor="3">Level 3</button>
-            </div>
+            <!-- Buttons are generated in initFloors() from the floors the
+                 loaded mall actually has. -->
+            <div class="floor-selector" style="top: 10px; left: 50px;"></div>
         </main>
     </div>
 

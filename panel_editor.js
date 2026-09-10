@@ -1,20 +1,74 @@
-// Westfield Newmarket Panel Location & Orientation Editor
+// Panel Location & Orientation Editor
+//
+// Which centre is edited comes from the ?mall= query parameter, resolved
+// against malls.json -- the same registry the Python pipeline reads, so the
+// editor and the simulation can never disagree about a mall's files.
+// Regenerate malls.json with `python3 malls.py` after changing malls.py.
 
 // Constants for coordinate distance scale
 const LAT_DEG_TO_M = 111000.0;
-const LON_DEG_TO_M = 88800.0; // Auckland latitude scale
+let LON_DEG_TO_M = 88800.0; // set per mall once its bounds are known
 
 // Global Editor State
 let map;
 let geojsonData;
 let panels = [];
 let selectedPanel = null;
+let mallConfig = null;
 
-// Map Layer groups
-let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.featureGroup() };
+// Map Layer groups. Floors are discovered from the backdrop and the panel CSV
+// rather than assumed to be 1/2/3 -- Newmarket has three, Albany has two.
+let floorLayers = {};
 let panelLayer = L.layerGroup();
 let coneLayer = L.layerGroup();
-let activeFloor = "1";
+let activeFloor = null;
+
+// Return the layer group for a floor, creating it on first use.
+function floorLayer(level) {
+    const key = String(level);
+    if (!floorLayers[key]) {
+        floorLayers[key] = L.featureGroup();
+    }
+    return floorLayers[key];
+}
+
+function sortedFloors() {
+    return Object.keys(floorLayers).sort((a, b) => {
+        const na = parseFloat(a), nb = parseFloat(b);
+        if (isNaN(na) || isNaN(nb)) return a.localeCompare(b);
+        return na - nb;
+    });
+}
+
+// Resolve the requested mall against malls.json.
+function loadMallConfig() {
+    const requested = new URLSearchParams(window.location.search).get("mall");
+    return fetch('malls.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load malls.json: HTTP ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(registry => {
+            const key = requested || registry.default;
+            const config = registry.malls[key];
+            if (!config) {
+                const known = Object.keys(registry.malls).join(", ");
+                throw new Error(`Unknown mall '${key}'. Available: ${known}`);
+            }
+            mallConfig = config;
+            mallConfig.allKeys = Object.keys(registry.malls);
+            document.title = `${config.name} Panel Editor`;
+            const subtitle = document.querySelector(".sidebar-header .subtitle");
+            if (subtitle) {
+                subtitle.textContent = `${config.name} — drag markers or edit values to position panels`;
+            }
+            const note = document.getElementById("csv-target-name");
+            if (note) note.textContent = config.panels;
+            return config;
+        });
+}
 
 // Cone parameters (consistent with simulation)
 const maxViewingDistance = 15.0;
@@ -44,8 +98,10 @@ function parseCSV(text) {
 
 // Initialize Leaflet Map
 function initMap() {
+    // No fixed centre: the view is fitted to the backdrop once it loads, so a
+    // new mall needs no coordinates configured anywhere.
     map = L.map('map', {
-        center: [-36.8715, 174.7766], // Westfield Newmarket
+        center: [-36.8715, 174.7766],
         zoom: 18,
         minZoom: 16,
         maxZoom: 21,
@@ -57,21 +113,88 @@ function initMap() {
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         maxZoom: 20
     }).addTo(map);
-    
-    // Add default layers to map
-    floorLayers["1"].addTo(map);
+
     panelLayer.addTo(map);
     coneLayer.addTo(map);
-    
+
     setTimeout(() => {
         map.invalidateSize();
     }, 200);
 }
 
-// Load Westfield Newmarket GeoJSON Layouts
-function loadGeoJSON() {
-    return fetch('Westfield_NewMarket_topology_4326.geojson')
-        .then(response => response.json())
+// Load whichever backdrop this mall has: a polygon floorplan or a corridor
+// mesh. Both exist only to give the person placing panels something to place
+// them against, so they render into the same per-floor layer groups.
+function loadBackdrop() {
+    if (mallConfig.backdrop.type === "graph") {
+        return loadGraphBackdrop(mallConfig.backdrop.path);
+    }
+    return loadGeoJSON(mallConfig.backdrop.path);
+}
+
+// Corridor-mesh backdrop: walkable edges as lines, plus the named entries,
+// destinations and escalators that anchor the layout.
+function loadGraphBackdrop(path) {
+    return fetch(path)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load graph ${path}: HTTP ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(graph => {
+            const nodeById = {};
+            (graph.nodes || []).forEach(n => { nodeById[n.id] = n; });
+
+            const nodeStyles = {
+                mall_entrance: { color: '#10b981', radius: 7, label: 'Entrance' },
+                shop_entry:    { color: '#f59e0b', radius: 7, label: 'Destination' },
+                escalator:     { color: '#d97706', radius: 6, label: 'Escalator' },
+                elevator:      { color: '#06b6d4', radius: 6, label: 'Elevator' }
+            };
+
+            (graph.edges || []).forEach(edge => {
+                const a = nodeById[edge.source], b = nodeById[edge.target];
+                if (!a || !b) return;
+                // Vertical links join two floors; drawing them on either one
+                // is misleading, so they are left out of the floor layers.
+                if (String(a.level) !== String(b.level)) return;
+                L.polyline([[a.y, a.x], [b.y, b.x]], {
+                    color: 'rgba(148, 163, 184, 0.35)',
+                    weight: 2
+                }).addTo(floorLayer(a.level));
+            });
+
+            (graph.nodes || []).forEach(node => {
+                const style = nodeStyles[node.type];
+                if (!style) return; // plain corridor mesh nodes stay implicit
+                const marker = L.circleMarker([node.y, node.x], {
+                    radius: style.radius,
+                    fillColor: style.color,
+                    color: style.color,
+                    weight: 1.5,
+                    opacity: 0.9,
+                    fillOpacity: 0.65
+                });
+                marker.bindTooltip(node.name || style.label, {
+                    permanent: false,
+                    direction: 'top',
+                    className: 'shop-label-tooltip'
+                });
+                marker.addTo(floorLayer(node.level));
+            });
+        });
+}
+
+// Polygon floorplan backdrop.
+function loadGeoJSON(path) {
+    return fetch(path)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to load topology ${path}: HTTP ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             geojsonData = data;
             
@@ -130,25 +253,18 @@ function loadGeoJSON() {
                         });
                     }
                     
-                    if (floorLayers[level]) {
-                        floorLayers[level].addLayer(layer);
-                    }
+                    floorLayer(level).addLayer(layer);
                 }
             });
-            
-            const bounds = floorLayers["1"].getBounds();
-            if (bounds.isValid()) {
-                map.fitBounds(bounds, { padding: [10, 10] });
-            }
         });
 }
 
 // Load Panels from CSV
 function loadPanels() {
-    return fetch('panel_locations_with_floor.csv')
+    return fetch(mallConfig.panels)
         .then(response => {
             if (!response.ok) {
-                throw new Error(`Failed to load panels CSV: HTTP ${response.status}`);
+                throw new Error(`Failed to load ${mallConfig.panels}: HTTP ${response.status}`);
             }
             return response.text();
         })
@@ -156,7 +272,7 @@ function loadPanels() {
             const parsed = parseCSV(csvText);
             panels = parsed.map(row => ({
                 id: row.panel_id,
-                siteId: row.site_id || "17056",
+                siteId: row.site_id || String(mallConfig.siteId),
                 name: `Panel ${row.panel_id}`,
                 lon: parseFloat(row.longitude),
                 lat: parseFloat(row.latitude),
@@ -165,10 +281,102 @@ function loadPanels() {
                 marker: null,
                 cone: null
             }));
-            
-            renderPanelsGrid();
-            renderPanelMarkers();
+
+            // A panel on a floor the backdrop does not cover still needs a
+            // layer, or it would silently vanish from the editor.
+            panels.forEach(p => floorLayer(p.floor));
         });
+}
+
+// Build the floor switcher from the floors actually present, then show the
+// lowest one. Called once, after the backdrop and panels have both loaded.
+function initFloors() {
+    // The map is laid out after initMap() runs, and Leaflet computes a zoom of
+    // maxZoom for any bounds while it still believes the container is 0x0 --
+    // which reads as the editor opening blank. Re-measure before fitting.
+    map.invalidateSize();
+
+    const container = document.querySelector(".floor-selector");
+    const floors = sortedFloors();
+    if (container) {
+        container.innerHTML = "";
+        floors.forEach(level => {
+            const btn = document.createElement("button");
+            btn.className = "floor-btn";
+            btn.setAttribute("data-floor", level);
+            btn.textContent = `Level ${level}`;
+            btn.addEventListener("click", () => switchFloor(level));
+            container.appendChild(btn);
+        });
+    }
+
+    const floorSelect = document.getElementById("edit-panel-floor");
+    if (floorSelect) {
+        floorSelect.innerHTML = "";
+        floors.forEach(level => {
+            const option = document.createElement("option");
+            option.value = level;
+            option.textContent = `Level ${level}`;
+            floorSelect.appendChild(option);
+        });
+    }
+
+    activeFloor = floors[0] || "1";
+    floorLayer(activeFloor).addTo(map);
+    const activeBtn = document.querySelector(`.floor-btn[data-floor="${activeFloor}"]`);
+    if (activeBtn) activeBtn.classList.add("active");
+
+    // Fit to every floor, not just the first one: floors rarely share a
+    // footprint, and fitting to the smallest opens the editor zoomed into a
+    // corner of the centre.
+    let bounds = null;
+    floors.forEach(level => {
+        const b = floorLayer(level).getBounds();
+        if (!b || !b.isValid()) return;
+        bounds = bounds ? bounds.extend(b) : L.latLngBounds(b.getSouthWest(), b.getNorthEast());
+    });
+    if (bounds && bounds.isValid()) {
+        fitWhenSized(bounds);
+        // Longitude degrees shrink with latitude; use the fitted centre so the
+        // view cones are drawn to the same scale the simulation measures with.
+        LON_DEG_TO_M = 111320.0 * Math.cos(bounds.getCenter().lat * Math.PI / 180);
+    }
+
+    renderPanelsGrid();
+    renderPanelMarkers();
+}
+
+// Fit once the map container has a real size.
+//
+// initFloors() can run before the stylesheet has been applied, and while
+// Leaflet still measures the container as 0x0 it resolves ANY bounds to
+// maxZoom -- which opens the editor blank, zoomed into a few square metres.
+// Waiting for a non-zero size costs a frame or two and is the difference
+// between a usable first view and an apparently broken one.
+function fitWhenSized(bounds, attemptsLeft = 60) {
+    map.invalidateSize();
+    const size = map.getSize();
+    if (size.x > 0 && size.y > 0) {
+        map.fitBounds(bounds, { padding: [10, 10] });
+        return;
+    }
+    if (attemptsLeft > 0) {
+        requestAnimationFrame(() => fitWhenSized(bounds, attemptsLeft - 1));
+    }
+}
+
+// Offer the other malls as links, so switching does not mean editing the URL.
+function initMallSwitcher() {
+    const container = document.getElementById("mall-switcher");
+    if (!container || !mallConfig.allKeys) return;
+    container.innerHTML = "";
+    mallConfig.allKeys.forEach(key => {
+        const link = document.createElement("a");
+        link.href = `?mall=${encodeURIComponent(key)}`;
+        link.textContent = key;
+        link.className = "mall-link" + (key === mallConfig.key ? " active" : "");
+        container.appendChild(link);
+    });
 }
 
 // Render Panel Markers on Map
@@ -484,7 +692,7 @@ function downloadUpdatedCSV() {
     link.setAttribute("href", url);
     
     const dateStr = new Date().toISOString().slice(0, 10);
-    link.setAttribute("download", `panel_locations_custom_${dateStr}.csv`);
+    link.setAttribute("download", `${mallConfig.key}_panel_locations_${dateStr}.csv`);
     
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
@@ -502,26 +710,27 @@ window.addEventListener("DOMContentLoaded", () => {
         renderPanelsGrid(searchField.value);
     });
     
-    // Bind Floor Selector Overlay Buttons
-    const mapFloorBtns = document.querySelectorAll(".floor-btn");
-    mapFloorBtns.forEach(btn => {
-        btn.addEventListener("click", () => {
-            const destFloor = btn.getAttribute("data-floor");
-            switchFloor(destFloor);
-        });
-    });
-    
+    // Floor buttons are built in initFloors(), once the floors are known.
+
     // Bind Sidebar actions and forms
     bindEditorFormEvents();
     document.getElementById("btn-download-csv").addEventListener("click", downloadUpdatedCSV);
-    
-    // Load map assets and panels CSV
-    Promise.all([
-        loadGeoJSON(),
-        loadPanels()
-    ]).then(() => {
-        console.log("Panel editor ready.");
-    }).catch(err => {
-        console.error("Initialization failed: ", err);
-    });
+
+    // Resolve the mall first: everything else depends on which files to fetch.
+    loadMallConfig()
+        .then(() => {
+            initMallSwitcher();
+            return Promise.all([loadBackdrop(), loadPanels()]);
+        })
+        .then(() => {
+            initFloors();
+            console.log(`Panel editor ready (${mallConfig.name}, ${panels.length} panels).`);
+        })
+        .catch(err => {
+            console.error("Initialization failed: ", err);
+            const grid = document.getElementById("editor-panels-grid");
+            if (grid) {
+                grid.innerHTML = `<p class="help-text" style="color:#f87171;">${err.message}</p>`;
+            }
+        });
 });

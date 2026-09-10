@@ -1446,3 +1446,21 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 
 
+
+/* Mall switcher in the panel editor sidebar */
+.mall-link {
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    font-size: 0.75rem;
+    text-decoration: none;
+    color: var(--text-secondary, #94a3b8);
+    text-transform: capitalize;
+}
+.mall-link:hover { border-color: #6366f1; color: #c7d2fe; }
+.mall-link.active {
+    background: #6366f1;
+    border-color: #6366f1;
+    color: #fff;
+    font-weight: 600;
+}
