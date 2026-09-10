@@ -54,7 +54,8 @@ ROUTE_ZONE_BOOST = 0.35
 ROUTE_BETA_VERTICAL = 0.5
 MAX_ROUTE_STEPS = 500
 ESCALATOR_ZONE_RADIUS_M = 15.0
-ESCALATOR_ZONE_NAME = "escalator_lv2_4"
+ESCALATOR_ZONE_NAME = MALL.escalator_zone_name
+ESCALATOR_ZONE_LEVEL = MALL.escalator_zone_level
 
 # Read-only sim state populated in main, inherited by fork workers (ponytail: fork COW on macOS/Linux).
 _SIM: dict = {}
@@ -212,12 +213,14 @@ def precompute_paths(nodes: dict, adj: dict, node_ids: list[str]):
 
 
 def build_escalator_zone_flags(nodes: dict) -> set[str]:
+    if not ESCALATOR_ZONE_NAME:
+        return set()
     anchor = next((n for n in nodes.values() if n.get("name") == ESCALATOR_ZONE_NAME), None)
     if not anchor:
         return set()
     zone: set[str] = set()
     for node in nodes.values():
-        if node["type"] != "corridor" or str(node["level"]) != "2":
+        if node["type"] != "corridor" or str(node["level"]) != ESCALATOR_ZONE_LEVEL:
             continue
         if distance_m(node["x"], node["y"], anchor["x"], anchor["y"]) <= ESCALATOR_ZONE_RADIUS_M:
             zone.add(node["id"])
@@ -747,7 +750,14 @@ def write_panel_metrics(panels: list[Panel], path: Path):
 def write_pair_overlap(panels: list[Panel], path: Path):
     with path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["panel_a", "panel_b", "unique_reach_a", "unique_reach_b", "shared_agents", "overlap_coefficient"])
+        # Both similarity measures are emitted because they answer different
+        # questions and are not interchangeable: the overlap coefficient
+        # (shared / smaller reach) says how much of the smaller panel's audience
+        # the larger one already covers, while Jaccard (shared / combined reach)
+        # is what the MAID-derived observed matrices measure. Comparing one
+        # against the other reads as a ~2x modelling error that is not there.
+        w.writerow(["panel_a", "panel_b", "unique_reach_a", "unique_reach_b",
+                    "shared_agents", "overlap_coefficient", "jaccard"])
         plist = sorted(panels, key=lambda p: p.id)
         for i, a in enumerate(plist):
             ra = a.reach.count()
@@ -756,7 +766,9 @@ def write_pair_overlap(panels: list[Panel], path: Path):
                 shared = a.reach.intersect_count(b.reach)
                 denom = min(ra, rb)
                 coef = shared / denom if denom else 0.0
-                w.writerow([a.id, b.id, ra, rb, shared, f"{coef:.6f}"])
+                union = ra + rb - shared
+                jaccard = shared / union if union else 0.0
+                w.writerow([a.id, b.id, ra, rb, shared, f"{coef:.6f}", f"{jaccard:.6f}"])
 
 
 def parse_args():
@@ -819,8 +831,11 @@ def apply_mall(args) -> None:
     """
     global MALL, OUT_DIR, PANELS_PATH, GRAPH_PATH, WATCH_PANELS
     global LON_DEG_TO_M, WEEKLY_VISITS, WEEKLY_UNIQUES
+    global ESCALATOR_ZONE_NAME, ESCALATOR_ZONE_LEVEL
 
     MALL = malls.resolve(args.mall)
+    ESCALATOR_ZONE_NAME = MALL.escalator_zone_name
+    ESCALATOR_ZONE_LEVEL = MALL.escalator_zone_level
     OUT_DIR = ROOT / MALL.results_dir
     PANELS_PATH = MALL.path("panels")
     GRAPH_PATH = MALL.path("graph")

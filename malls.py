@@ -39,6 +39,12 @@ class Mall:
     # topology file is already OSM-flavoured 4326 and needs no conversion.
     source_topology: str | None = None
 
+    # Explicit node/edge list, the input to import_csv_topology.py. Set instead
+    # of `topology` for a centre whose layout was authored as a graph rather
+    # than drawn as corridor polygons.
+    csv_nodes: str | None = None
+    csv_edges: str | None = None
+
     # Metres per degree of longitude at this centre's latitude. Newmarket keeps
     # the empirical value the original graph was built with so its output stays
     # reproducible; other malls use 111320 * cos(latitude).
@@ -58,6 +64,15 @@ class Mall:
 
     # Panels echoed individually in the run summary; purely a reporting aid.
     watch_panels: tuple[str, ...] = ()
+
+    # Node name marking the corridor cluster that gets ROUTE_ZONE_BOOST under
+    # segment-logit routing. None disables the boost for this mall.
+    escalator_zone_name: str | None = None
+    escalator_zone_level: str = "2"
+
+    # Observed pairwise panel similarity from MAID ping data, if available.
+    # Not a simulation input -- ground truth to validate the output against.
+    observed_similarity: str | None = None
 
     def path(self, attr: str) -> Path:
         value = getattr(self, attr)
@@ -80,12 +95,20 @@ MALLS: dict[str, Mall] = {
         weekly_visits=200_000,
         weekly_uniques=123_000,
         watch_panels=("27052", "27053", "27054"),
+        escalator_zone_name="escalator_lv2_4",
+        escalator_zone_level="2",
     ),
     "albany": Mall(
         key="albany",
         name="Westfield Albany",
         site_id=17055,
-        # Already a native OSM export in EPSG:4326 -- no conversion stage.
+        # Built from the explicit node/edge topology the earlier
+        # RetailSimulation work produced (import_csv_topology.py), not from the
+        # OSM export. The export is kept for reference and mapping, but it has
+        # no shop entry points and no escalators tagged `conveying`, so a graph
+        # built from it has nowhere to walk to and no way between floors.
+        csv_nodes="data/albany/albany_nodes.csv",
+        csv_edges="data/albany/albany_edges.csv",
         source_topology=None,
         topology="Westfield_Albany_topology.geojson",
         graph="albany_graph.json",
@@ -93,14 +116,19 @@ MALLS: dict[str, Mall] = {
         results_dir="results/albany",
         # 111320 * cos(36.7289 deg) -- Albany sits ~16km north of Newmarket.
         lon_deg_to_m=89241.0,
-        # The OSM export is 0-based and carries multi-level strings. This map is
-        # a starting point, not a curation decision: revisit it alongside the
-        # topology pass that adds shop entry points and escalators.
+        # The node/edge topology is already 1-based and single-valued. This map
+        # only matters if the OSM export is ever used instead.
         level_map={"0": "1", "1": "2", "0;1": "1", "1;2": "2"},
-        # No agreed Albany footfall yet -- pass --weekly-visits/--weekly-uniques.
-        weekly_visits=None,
-        weekly_uniques=None,
+        # DERIVED, not agreed. data/albany/albany_demand.json puts Albany at
+        # 8.4M annual visits against Newmarket's 12.7M. Scaling Newmarket's
+        # 200k/123k by 8.4/12.7 gives 132k weekly visits and 81k uniques.
+        # Override per run with --weekly-visits / --weekly-uniques.
+        weekly_visits=132_000,
+        weekly_uniques=81_000,
         watch_panels=(),
+        # No equivalent of Newmarket's boosted escalator corridor identified.
+        escalator_zone_name=None,
+        observed_similarity="data/albany/albany_panel_similarity_matrix_a.csv",
     ),
 }
 

@@ -1,0 +1,39 @@
+{
+  "location": "Westfield Albany",
+  "annual_visits": 8400000,
+  "operating_hours_per_day": 11,
+  "peak_hourly_visitors": 2092,
+  "entry_distribution": {
+    "main_entry": 0.3,
+    "carpark_l1_e": 0.25,
+    "carpark_l1_w": 0.25,
+    "cinema_entry": 0.1,
+    "foodcourt_entry": 0.1
+  },
+  "dow_multiplier": {
+    "Monday": 0.85,
+    "Tuesday": 0.85,
+    "Wednesday": 0.85,
+    "Thursday": 0.9,
+    "Friday": 1.1,
+    "Saturday": 1.3,
+    "Sunday": 1.05
+  },
+  "agent_types": {
+    "mission": {
+      "fraction": 0.45,
+      "speed_mult": 1.2,
+      "dwell_mult": 0.6
+    },
+    "browse": {
+      "fraction": 0.35,
+      "speed_mult": 0.8,
+      "dwell_mult": 1.4
+    },
+    "linked": {
+      "fraction": 0.2,
+      "speed_mult": 1.0,
+      "dwell_mult": 1.0
+    }
+  }
+}
