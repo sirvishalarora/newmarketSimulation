@@ -2,7 +2,8 @@
 
 // Constants
 const LAT_DEG_TO_M = 111000.0;
-const LON_DEG_TO_M = 88800.0; // at Auckland latitude
+// Latitude-dependent, so initFloors() sets it from the mall's own extent.
+let LON_DEG_TO_M = 88800.0; // at Newmarket's latitude, until a mall loads
 
 // Global Simulation & Map State
 let map;
@@ -15,7 +16,7 @@ let pathCache = {}; // sourceNodeId -> { targetNodeId: pathArray }
 let distToTarget = {}; // targetNodeId -> { anyNodeId: distance }
 let nodeInEscalatorZone = {}; // corridor nodes near escalator_lv2_4
 let panels = [];
-let panelsByFloor = { "1": [], "2": [], "3": [] };
+let panelsByFloor = {};
 let cachedSpawnNodes = null;
 let cachedShopNodes = null;
 let categoryShopCounts = {};
@@ -29,13 +30,18 @@ const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satu
 const DAILY_VISIT_WEIGHTS = [0.11, 0.12, 0.13, 0.145, 0.165, 0.195, 0.135];
 
 
-// Map Layer groups
-let floorLayers = { "1": L.featureGroup(), "2": L.featureGroup(), "3": L.featureGroup() };
+// Map Layer groups. Floors are discovered from the topology and panel CSV
+// rather than assumed to be 1/2/3 -- Newmarket has three, Albany has two.
+let floorLayers = {};
 let graphLayer = L.layerGroup();
 let panelLayer = L.layerGroup();
 let coneLayer = L.layerGroup();
-let activeFloor = "1";
+let activeFloor = null;
 let showGraph = false;
+
+let mallConfig = null;
+const floorLayer = (level) => MallKit.floorLayer(floorLayers, level);
+const sortedFloors = () => MallKit.sortedFloors(floorLayers);
 
 // UI Configuration Parameters
 let weeklyVisitsTotal = 200000;
@@ -185,15 +191,154 @@ function rebuildCategoryShopCounts() {
     categoryShopCounts = {};
     if (!cachedShopNodes) return;
     cachedShopNodes.forEach(node => {
-        const cat = getStoreCategory(node.name);
+        const cat = nodeCategory(node);
         categoryShopCounts[cat] = (categoryShopCounts[cat] || 0) + 1;
     });
 }
 
+// A destination's category. A topology that states one is trusted over
+// guessing from the name -- name matching only knows Newmarket's tenants, so
+// it silently files every Albany anchor except Farmers and JB Hi-Fi under
+// "specialty".
+function nodeCategory(node) {
+    if (node.category) return String(node.category);
+    return getStoreCategory(node.name);
+}
+
+// True when the topology carries its own destination weights, in which case
+// they are used directly and the category sliders do not apply.
+function graphHasOwnWeights() {
+    return (cachedShopNodes || []).some(n => Number(n.weight) > 0);
+}
+
+// Show one floor's backdrop, panels and cones.
+function switchFloor(level) {
+    MallKit.markActiveFloorButton(level);
+    const prevFloor = activeFloor;
+    activeFloor = String(level);
+    if (prevFloor !== null && floorLayers[prevFloor]) map.removeLayer(floorLayers[prevFloor]);
+    floorLayer(activeFloor).addTo(map);
+    renderGraphOverlay();
+    renderPanelMarkers();
+    renderPanelCones();
+}
+
+// Build every floor-dependent control from the floors actually present, then
+// show the lowest one. Called once, after the backdrop and panels have loaded.
+function initFloors() {
+    const floors = sortedFloors();
+    MallKit.buildFloorControls(floors, switchFloor);
+
+    // "Floor N Only" quick-select, one per floor this mall has.
+    const quickSelect = document.getElementById("floor-only-buttons");
+    if (quickSelect) {
+        quickSelect.innerHTML = "";
+        floors.forEach(level => {
+            const btn = document.createElement("button");
+            btn.className = "btn btn-sm btn-secondary";
+            btn.textContent = `Floor ${level} Only`;
+            btn.addEventListener("click", () => {
+                panels.forEach(p => {
+                    const chk = document.getElementById(`chk-${p.id}`);
+                    if (chk) chk.checked = (String(p.floor) === String(level));
+                });
+                updateSelectedPanelsHeaderCount();
+                updatePanelMapVisuals();
+            });
+            quickSelect.appendChild(btn);
+        });
+    }
+
+    annotateCategoryWeights();
+
+    activeFloor = floors[0] || "1";
+    floorLayer(activeFloor).addTo(map);
+    MallKit.markActiveFloorButton(activeFloor);
+
+    // Fit across all floors: they rarely share a footprint, and fitting to the
+    // first opens the map in a corner of the centre.
+    const bounds = MallKit.combinedBounds(floorLayers, floors);
+    if (bounds && bounds.isValid()) {
+        MallKit.fitWhenSized(map, bounds);
+        LON_DEG_TO_M = MallKit.lonDegToM(bounds.getCenter().lat);
+    }
+
+    renderPanelMarkers();
+    renderPanelCones();
+}
+
+// The category sliders are named for Newmarket's tenants. When the loaded
+// topology supplies its own destination weights those sliders are bypassed
+// entirely, so say so rather than leaving controls that look live but are not.
+function annotateCategoryWeights() {
+    ensureCachedNodes();
+    const note = document.getElementById("category-weights-note");
+    if (!note) return;
+    if (graphHasOwnWeights()) {
+        const named = (cachedShopNodes || [])
+            .filter(n => Number(n.weight) > 0)
+            .sort((a, b) => Number(b.weight) - Number(a.weight))
+            .map(n => `${n.name || n.id} ${n.weight}`)
+            .join(" · ");
+        note.textContent = `${mallConfig.name} supplies its own destination weights, `
+            + `so these sliders have no effect: ${named}`;
+        note.style.display = "block";
+        document.querySelectorAll(".wt-slider").forEach(el => {
+            el.disabled = true;
+            el.style.opacity = 0.4;
+        });
+    } else {
+        note.style.display = "none";
+        document.querySelectorAll(".wt-slider").forEach(el => {
+            el.disabled = false;
+            el.style.opacity = "";
+        });
+    }
+}
+
+// Seed the footfall controls and headings from the mall.
+function applyMallToUI(config) {
+    const heading = document.querySelector(".sidebar-header h1");
+    if (heading) heading.textContent = config.name;
+
+    const setSlider = (inputId, valueId, amount) => {
+        if (amount === null || amount === undefined) return;
+        const input = document.getElementById(inputId);
+        const label = document.getElementById(valueId);
+        if (!input) return;
+        // A mall outside the stock slider range would otherwise be clamped
+        // silently to a footfall it never had.
+        if (amount < Number(input.min)) input.min = amount;
+        if (amount > Number(input.max)) input.max = amount;
+        input.value = amount;
+        if (label) label.textContent = amount.toLocaleString();
+    };
+    setSlider("input-weekly-visits", "val-weekly-visits", config.weeklyVisits);
+    setSlider("input-weekly-uniques", "val-weekly-uniques", config.weeklyUniques);
+
+    if (config.weeklyVisits) weeklyVisitsTotal = config.weeklyVisits;
+    if (config.weeklyUniques) {
+        weeklyUniquePool = config.weeklyUniques;
+        totalAgentsToSimulate = weeklyUniquePool;
+    }
+
+    const zoneHelp = document.getElementById("zone-boost-help");
+    if (zoneHelp) {
+        zoneHelp.textContent = config.escalatorZoneName
+            ? `Extra pull for corridor nodes within 15m of ${config.escalatorZoneName} (L${config.escalatorZoneLevel} panel branch).`
+            : "No boosted corridor configured for this centre — this control has no effect.";
+    }
+
+    updateDailyWeightsPreview();
+}
+
 function rebuildPanelsByFloor() {
-    panelsByFloor = { "1": [], "2": [], "3": [] };
+    // Buckets come from the panels themselves; a fixed 1/2/3 list silently
+    // dropped every panel on any other floor.
+    panelsByFloor = {};
     panels.forEach(p => {
-        if (panelsByFloor[p.floor]) panelsByFloor[p.floor].push(p);
+        if (!panelsByFloor[p.floor]) panelsByFloor[p.floor] = [];
+        panelsByFloor[p.floor].push(p);
     });
 }
 
@@ -256,8 +401,10 @@ function parseCSV(text) {
 
 // Initialize Leaflet Map
 function initMap() {
+    // No fixed centre: the view is fitted to the loaded topology, so a new
+    // mall needs no coordinates configured anywhere.
     map = L.map('map', {
-        center: [-36.8715, 174.7766], // Center of Westfield Newmarket
+        center: [-36.8715, 174.7766],
         zoom: 18,
         minZoom: 16,
         maxZoom: 21,
@@ -270,8 +417,7 @@ function initMap() {
         maxZoom: 20
     }).addTo(map);
 
-    // Add default layers to map
-    floorLayers["1"].addTo(map);
+    // The active floor layer is added in initFloors(), once floors are known.
     panelLayer.addTo(map);
     coneLayer.addTo(map);
 
@@ -281,10 +427,28 @@ function initMap() {
     }, 200);
 }
 
-// Load and Render Westfield Newmarket GeoJSON layouts
+// Render whichever backdrop this mall has: a polygon floorplan, or -- for a
+// mall with none -- its corridor mesh with the named entrances, destinations
+// and vertical connectors drawn on top.
+function loadBackdrop() {
+    if (mallConfig.backdrop.type === "graph") {
+        console.log("Rendering corridor-mesh backdrop...");
+        return fetch(mallConfig.backdrop.path)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Failed to load graph backdrop: HTTP ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(graph => MallKit.renderGraphBackdrop(graph, floorLayers));
+    }
+    return loadGeoJSON();
+}
+
+// Load and render a polygon floorplan.
 function loadGeoJSON() {
     console.log("Fetching mall topology GeoJSON...");
-    return fetch('Westfield_NewMarket_topology_4326.geojson')
+    return fetch(mallConfig.backdrop.path)
         .then(response => {
             if (!response.ok) {
                 throw new Error(`Failed to load GeoJSON topology: HTTP ${response.status}`);
@@ -368,17 +532,10 @@ function loadGeoJSON() {
                     }
 
                     // Put in correct floor layer group
-                    if (floorLayers[level]) {
-                        floorLayers[level].addLayer(layer);
-                    }
+                    floorLayer(level).addLayer(layer);
                 }
             });
-
-            // Zoom to fit bounds
-            const bounds = floorLayers["1"].getBounds();
-            if (bounds.isValid()) {
-                map.fitBounds(bounds, { padding: [10, 10] });
-            }
+            // Fitting happens in initFloors(), across all floors at once.
         })
         .catch(err => {
             console.error("Error rendering GeoJSON:", err);
@@ -388,8 +545,8 @@ function loadGeoJSON() {
 
 // Load Network Graph and build connectivity lists
 function loadGraph() {
-    console.log("Fetching newmarket network graph JSON...");
-    return fetch('newmarket_graph.json')
+    console.log(`Fetching network graph ${mallConfig.graph}...`);
+    return fetch(mallConfig.graph)
         .then(response => {
             if (!response.ok) {
                 throw new Error(`Failed to load graph JSON: HTTP ${response.status}`);
@@ -464,8 +621,8 @@ function renderGraphOverlay() {
 
 // Load panel locations from CSV
 function loadPanels() {
-    console.log("Fetching panel locations CSV...");
-    return fetch('panel_locations_with_floor.csv')
+    console.log(`Fetching panel locations ${mallConfig.panels}...`);
+    return fetch(mallConfig.panels)
         .then(response => {
             if (!response.ok) {
                 throw new Error(`Failed to load panels CSV: HTTP ${response.status}`);
@@ -694,14 +851,18 @@ function dijkstraAll(startNodeId) {
     return { distances: dist, paths: paths };
 }
 
-// Corridor nodes within radius of escalator_lv2_4 (L2 branch panel zone)
+// Corridor nodes within radius of this mall's boosted escalator, if it has
+// one. A mall with no such node configured simply gets no zone boost.
 function buildEscalatorZoneFlags() {
     nodeInEscalatorZone = {};
-    const anchor = Object.values(nodesMap).find(n => n.name === "escalator_lv2_4");
+    const zoneName = mallConfig && mallConfig.escalatorZoneName;
+    if (!zoneName) return;
+    const zoneLevel = String((mallConfig && mallConfig.escalatorZoneLevel) || "2");
+    const anchor = Object.values(nodesMap).find(n => n.name === zoneName);
     if (!anchor) return;
 
     Object.values(nodesMap).forEach(node => {
-        if (node.type !== "corridor" || node.level !== "2") return;
+        if (node.type !== "corridor" || String(node.level) !== zoneLevel) return;
         const dx = (node.x - anchor.x) * LON_DEG_TO_M;
         const dy = (node.y - anchor.y) * LAT_DEG_TO_M;
         if (Math.hypot(dx, dy) <= ESCALATOR_ZONE_RADIUS_M) {
@@ -797,10 +958,19 @@ function selectNextShopGravity(currentNodeId, lastVisitedShopId) {
     shopNodes.forEach(node => {
         if (node.id === lastVisitedShopId) return;
 
-        const cat = getStoreCategory(node.name);
-        const shopsInCategory = categoryShopCounts[cat] || 1;
-        // Category slider = total pull for that store type; split evenly across its shop nodes.
-        let baseWt = (categoryWeights[cat] || 0.3) / shopsInCategory;
+        // Prefer a weight the topology states for this destination. Albany's
+        // anchors carry curated pull values (Food Court 9, New World 8,
+        // Kmart 7, ...) which are strictly better information than mapping
+        // them onto Newmarket's tenant sliders.
+        let baseWt;
+        if (Number(node.weight) > 0) {
+            baseWt = Number(node.weight);
+        } else {
+            const cat = nodeCategory(node);
+            const shopsInCategory = categoryShopCounts[cat] || 1;
+            // Category slider = total pull for that store type; split evenly across its shop nodes.
+            baseWt = (categoryWeights[cat] || 0.3) / shopsInCategory;
+        }
         baseWt = Math.max(0.001, baseWt);
 
         let dist = distanceMatrix[currentNodeId][node.id];
@@ -950,7 +1120,7 @@ function simulateAgent(personId, activePanelIds) {
             continue;
         }
 
-        shopCategoryVisits[getStoreCategory(targetShop.name)]++;
+        shopCategoryVisits[nodeCategory(targetShop)]++;
         walkRoute(currentNodeId, targetShop.id, personId, activePanelIds, passageState, stats);
         currentNodeId = targetShop.id;
         lastVisitedShopId = targetShop.id;
@@ -1708,50 +1878,8 @@ function bindUIControls() {
     });
 
     // Floor-specific selectors
-    document.getElementById("btn-select-fl1").addEventListener("click", () => {
-        panels.forEach(p => {
-            const chk = document.getElementById(`chk-${p.id}`);
-            if (chk) chk.checked = (p.floor === "1");
-        });
-        updateSelectedPanelsHeaderCount();
-        updatePanelMapVisuals();
-    });
-    document.getElementById("btn-select-fl2").addEventListener("click", () => {
-        panels.forEach(p => {
-            const chk = document.getElementById(`chk-${p.id}`);
-            if (chk) chk.checked = (p.floor === "2");
-        });
-        updateSelectedPanelsHeaderCount();
-        updatePanelMapVisuals();
-    });
-    document.getElementById("btn-select-fl3").addEventListener("click", () => {
-        panels.forEach(p => {
-            const chk = document.getElementById(`chk-${p.id}`);
-            if (chk) chk.checked = (p.floor === "3");
-        });
-        updateSelectedPanelsHeaderCount();
-        updatePanelMapVisuals();
-    });
-
-    // Map Floor Overlay Selector Buttons
-    const mapFloorBtns = document.querySelectorAll(".floor-btn");
-    mapFloorBtns.forEach(btn => {
-        btn.addEventListener("click", () => {
-            mapFloorBtns.forEach(b => b.classList.remove("active"));
-            btn.classList.add("active");
-
-            const prevFloor = activeFloor;
-            activeFloor = btn.getAttribute("data-floor");
-
-            // Toggle layer
-            if (floorLayers[prevFloor]) map.removeLayer(floorLayers[prevFloor]);
-            if (floorLayers[activeFloor]) map.addLayer(floorLayers[activeFloor]);
-
-            renderGraphOverlay();
-            renderPanelMarkers();
-            renderPanelCones();
-        });
-    });
+    // Per-floor quick-select and the map floor overlay buttons are generated
+    // in initFloors(), once the mall's floors are known.
 
     // Run button
     document.getElementById("btn-run").addEventListener("click", runSimulation);
@@ -2495,14 +2623,23 @@ window.addEventListener("DOMContentLoaded", () => {
 
     bindUIControls();
 
-    // 2. Load panel list CSV and network graph asynchronously
-    const promises = [loadPanels(), loadGraph()];
-    if (isLeafletLoaded) {
-        promises.push(loadGeoJSON());
-    }
+    // 2. Resolve the mall first -- everything else depends on which files to
+    //    fetch and what footfall to start from.
+    MallKit.load({ titleSuffix: "Pedestrian Gravity Simulation" }).then(config => {
+        mallConfig = config;
+        applyMallToUI(config);
+        MallKit.initSwitcher(config);
 
-    Promise.all(promises).then(() => {
-        console.log("Initialization Complete. Headless Engine Ready.");
+        const promises = [loadPanels(), loadGraph()];
+        if (isLeafletLoaded) {
+            promises.push(loadBackdrop());
+        }
+        return Promise.all(promises);
+    }).then(() => {
+        if (isLeafletLoaded) {
+            initFloors();
+        }
+        console.log(`Initialization Complete (${mallConfig.name}, ${panels.length} panels).`);
         renderPanelsSelectionGrid();
 
         // Start precomputation in background so that there's no lag when running

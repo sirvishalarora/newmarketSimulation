@@ -6,20 +6,30 @@
       "name": "Westfield Newmarket",
       "siteId": 17056,
       "panels": "panel_locations_with_floor.csv",
+      "graph": "newmarket_graph.json",
       "backdrop": {
         "type": "geojson",
         "path": "Westfield_NewMarket_topology_4326.geojson"
-      }
+      },
+      "weeklyVisits": 200000,
+      "weeklyUniques": 123000,
+      "escalatorZoneName": "escalator_lv2_4",
+      "escalatorZoneLevel": "2"
     },
     "albany": {
       "key": "albany",
       "name": "Westfield Albany",
       "siteId": 17055,
       "panels": "albany_panel_locations_with_floor.csv",
+      "graph": "albany_graph.json",
       "backdrop": {
         "type": "graph",
         "path": "albany_graph.json"
-      }
+      },
+      "weeklyVisits": 132000,
+      "weeklyUniques": 81000,
+      "escalatorZoneName": null,
+      "escalatorZoneLevel": "2"
     }
   }
 }

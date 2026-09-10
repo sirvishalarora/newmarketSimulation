@@ -111,9 +111,27 @@ Drag markers or edit lat/lon/orientation, then **Download Updated CSV** — it
 writes `<mall>_panel_locations_<date>.csv` in the same format as the input.
 Replace the mall's `panels` file with it and re-run the simulation.
 
-> The simulation viewer (`index.html` / `app.js`) is still Newmarket-only, so
-> "Back to Simulation" always shows Newmarket regardless of the mall you were
-> editing.
+### The in-browser simulation
+
+`index.html` takes the same `?mall=` parameter and runs the simulation
+interactively — footfall, gravity and routing sliders, live map, exposure and
+similarity results. It shares mall resolution with the editor via
+`mall_config.js`, so both pages and the Python pipeline read one registry.
+
+Two things adapt to the loaded mall beyond its files:
+
+- **Footfall sliders** start at the mall's configured figures, widening their
+  range if needed rather than silently clamping to a footfall it never had.
+- **Destination weights.** The store-category sliders are named for
+  Newmarket's tenants. A topology that supplies its own destination weights —
+  as Albany's does (Food Court 9, New World 8, Kmart 7, …) — uses them
+  directly; the sliders are then disabled and say so. Categories likewise come
+  from the topology when it states them, since name matching only recognises
+  Newmarket's tenants and would file every Albany anchor but two under
+  "specialty".
+
+The browser and headless engines agree: on Albany they rank the top panels
+identically (27014, 27025, 27019, 27015, 27023).
 
 ## Footfall
 

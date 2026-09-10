@@ -167,7 +167,14 @@ def browser_config() -> dict:
             "name": mall.name,
             "siteId": mall.site_id,
             "panels": mall.panels,
+            "graph": mall.graph,
             "backdrop": backdrop,
+            # The in-browser simulation seeds its footfall sliders from these.
+            # null means no agreed figure, and the page keeps its own default.
+            "weeklyVisits": mall.weekly_visits,
+            "weeklyUniques": mall.weekly_uniques,
+            "escalatorZoneName": mall.escalator_zone_name,
+            "escalatorZoneLevel": mall.escalator_zone_level,
         }
     return {"default": DEFAULT_MALL, "malls": out}
 

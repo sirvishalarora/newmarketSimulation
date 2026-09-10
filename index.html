@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Westfield Newmarket Pedestrian Gravity Simulation Portal</title>
+    <title>Pedestrian Gravity Simulation Portal</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="leaflet.css" />
     <!-- Google Fonts: Inter & Outfit -->
@@ -20,9 +20,11 @@
         <!-- Sidebar Controls -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <h1>Westfield Newmarket</h1>
+                <h1>Pedestrian Gravity Simulation</h1>
                 <p class="subtitle">Pedestrian Gravity Simulation Portal</p>
                 <div class="version-badge">HEADLESS MAP V2.0</div>
+                <!-- Populated by MallKit.initSwitcher() from malls.json -->
+                <div id="mall-switcher" style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;"></div>
                 <div class="nav-links" style="margin-top: 10px; display: flex; gap: 8px;">
                     <a href="panel_editor.html" class="btn btn-sm btn-secondary" style="text-decoration: none; display: inline-block; width: 100%;">✏️ Edit Panel Locations</a>
                 </div>
@@ -106,6 +108,9 @@
                     <!-- Attractiveness Weights -->
                     <div class="category-weights-title">Store Category Attractiveness</div>
                     <span class="help-text" style="display: block; margin-bottom: 10px;">Each slider sets total pull for that store type, split evenly across its shop nodes in the graph.</span>
+                    <!-- Filled in by annotateCategoryWeights() when the mall's
+                         topology supplies its own destination weights. -->
+                    <span class="help-text" id="category-weights-note" style="display: none; margin-bottom: 10px; color: #f59e0b;"></span>
 
                     <div class="control-group wt-group">
                         <div class="control-label">
@@ -230,7 +235,7 @@
                                 <span class="control-val" id="val-route-zone-boost">0.35</span>
                             </div>
                             <input type="range" id="input-route-zone-boost" min="0.0" max="1.5" value="0.35" step="0.05" />
-                            <span class="help-text">Extra pull for corridor nodes within 15m of escalator_lv2_4 (L2 panel branch).</span>
+                            <span class="help-text" id="zone-boost-help">Extra pull for corridor nodes near this centre's boosted escalator.</span>
                         </div>
 
                         <div class="control-group">
@@ -307,10 +312,9 @@
                 <div class="map-card glass-card">
                     <div id="map"></div>
                     <!-- Floor switcher overlay inside the map container -->
+                    <!-- Buttons are generated in initFloors() from the
+                         floors the loaded mall actually has. -->
                     <div class="floor-selector">
-                        <button class="floor-btn active" data-floor="1">Level 1</button>
-                        <button class="floor-btn" data-floor="2">Level 2</button>
-                        <button class="floor-btn" data-floor="3">Level 3</button>
                     </div>
                 </div>
 
@@ -332,9 +336,8 @@
                             <div class="setup-actions-grid">
                                 <button id="btn-select-all" class="btn btn-sm btn-secondary">Select All</button>
                                 <button id="btn-select-none" class="btn btn-sm btn-secondary">Select None</button>
-                                <button id="btn-select-fl1" class="btn btn-sm btn-secondary">Floor 1 Only</button>
-                                <button id="btn-select-fl2" class="btn btn-sm btn-secondary">Floor 2 Only</button>
-                                <button id="btn-select-fl3" class="btn btn-sm btn-secondary">Floor 3 Only</button>
+                                <!-- One button per floor, generated in initFloors() -->
+                                <span id="floor-only-buttons" style="display: contents;"></span>
                             </div>
                         </div>
                     </div>
@@ -542,6 +545,8 @@
 
     <!-- Leaflet JS -->
     <script src="leaflet.js"></script>
+    <!-- Shared mall resolution (reads malls.json) -->
+    <script src="mall_config.js"></script>
     <!-- Application Script -->
     <script src="app.js"></script>
 </body>

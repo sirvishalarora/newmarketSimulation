@@ -23,78 +23,29 @@ let panelLayer = L.layerGroup();
 let coneLayer = L.layerGroup();
 let activeFloor = null;
 
-// Return the layer group for a floor, creating it on first use.
-function floorLayer(level) {
-    const key = String(level);
-    if (!floorLayers[key]) {
-        floorLayers[key] = L.featureGroup();
-    }
-    return floorLayers[key];
-}
+const floorLayer = (level) => MallKit.floorLayer(floorLayers, level);
+const sortedFloors = () => MallKit.sortedFloors(floorLayers);
 
-function sortedFloors() {
-    return Object.keys(floorLayers).sort((a, b) => {
-        const na = parseFloat(a), nb = parseFloat(b);
-        if (isNaN(na) || isNaN(nb)) return a.localeCompare(b);
-        return na - nb;
-    });
-}
-
-// Resolve the requested mall against malls.json.
+// Resolve the requested mall, then label the page with it.
 function loadMallConfig() {
-    const requested = new URLSearchParams(window.location.search).get("mall");
-    return fetch('malls.json')
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`Failed to load malls.json: HTTP ${response.status}`);
-            }
-            return response.json();
-        })
-        .then(registry => {
-            const key = requested || registry.default;
-            const config = registry.malls[key];
-            if (!config) {
-                const known = Object.keys(registry.malls).join(", ");
-                throw new Error(`Unknown mall '${key}'. Available: ${known}`);
-            }
-            mallConfig = config;
-            mallConfig.allKeys = Object.keys(registry.malls);
-            document.title = `${config.name} Panel Editor`;
-            const subtitle = document.querySelector(".sidebar-header .subtitle");
-            if (subtitle) {
-                subtitle.textContent = `${config.name} — drag markers or edit values to position panels`;
-            }
-            const note = document.getElementById("csv-target-name");
-            if (note) note.textContent = config.panels;
-            return config;
-        });
+    return MallKit.load({ titleSuffix: "Panel Editor" }).then(config => {
+        mallConfig = config;
+        const subtitle = document.querySelector(".sidebar-header .subtitle");
+        if (subtitle) {
+            subtitle.textContent = `${config.name} — drag markers or edit values to position panels`;
+        }
+        const note = document.getElementById("csv-target-name");
+        if (note) note.textContent = config.panels;
+        return config;
+    });
 }
 
 // Cone parameters (consistent with simulation)
 const maxViewingDistance = 15.0;
 const viewingConeAngle = 60.0;
 
-// Helper: Parse CSV
-function parseCSV(text) {
-    const lines = text.split("\n");
-    if (lines.length === 0) return [];
-    
-    const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ''));
-    const result = [];
-    
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        
-        const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ''));
-        const obj = {};
-        for (let j = 0; j < headers.length; j++) {
-            obj[headers[j]] = cols[j] || "";
-        }
-        result.push(obj);
-    }
-    return result;
-}
+// Helper: Parse CSV (shared with the simulation page)
+const parseCSV = MallKit.parseCSV;
 
 // Initialize Leaflet Map
 function initMap() {
@@ -132,8 +83,7 @@ function loadBackdrop() {
     return loadGeoJSON(mallConfig.backdrop.path);
 }
 
-// Corridor-mesh backdrop: walkable edges as lines, plus the named entries,
-// destinations and escalators that anchor the layout.
+// Corridor-mesh backdrop, for a mall with no polygon floorplan.
 function loadGraphBackdrop(path) {
     return fetch(path)
         .then(response => {
@@ -142,48 +92,7 @@ function loadGraphBackdrop(path) {
             }
             return response.json();
         })
-        .then(graph => {
-            const nodeById = {};
-            (graph.nodes || []).forEach(n => { nodeById[n.id] = n; });
-
-            const nodeStyles = {
-                mall_entrance: { color: '#10b981', radius: 7, label: 'Entrance' },
-                shop_entry:    { color: '#f59e0b', radius: 7, label: 'Destination' },
-                escalator:     { color: '#d97706', radius: 6, label: 'Escalator' },
-                elevator:      { color: '#06b6d4', radius: 6, label: 'Elevator' }
-            };
-
-            (graph.edges || []).forEach(edge => {
-                const a = nodeById[edge.source], b = nodeById[edge.target];
-                if (!a || !b) return;
-                // Vertical links join two floors; drawing them on either one
-                // is misleading, so they are left out of the floor layers.
-                if (String(a.level) !== String(b.level)) return;
-                L.polyline([[a.y, a.x], [b.y, b.x]], {
-                    color: 'rgba(148, 163, 184, 0.35)',
-                    weight: 2
-                }).addTo(floorLayer(a.level));
-            });
-
-            (graph.nodes || []).forEach(node => {
-                const style = nodeStyles[node.type];
-                if (!style) return; // plain corridor mesh nodes stay implicit
-                const marker = L.circleMarker([node.y, node.x], {
-                    radius: style.radius,
-                    fillColor: style.color,
-                    color: style.color,
-                    weight: 1.5,
-                    opacity: 0.9,
-                    fillOpacity: 0.65
-                });
-                marker.bindTooltip(node.name || style.label, {
-                    permanent: false,
-                    direction: 'top',
-                    className: 'shop-label-tooltip'
-                });
-                marker.addTo(floorLayer(node.level));
-            });
-        });
+        .then(graph => MallKit.renderGraphBackdrop(graph, floorLayers));
 }
 
 // Polygon floorplan backdrop.
@@ -296,87 +205,24 @@ function initFloors() {
     // which reads as the editor opening blank. Re-measure before fitting.
     map.invalidateSize();
 
-    const container = document.querySelector(".floor-selector");
     const floors = sortedFloors();
-    if (container) {
-        container.innerHTML = "";
-        floors.forEach(level => {
-            const btn = document.createElement("button");
-            btn.className = "floor-btn";
-            btn.setAttribute("data-floor", level);
-            btn.textContent = `Level ${level}`;
-            btn.addEventListener("click", () => switchFloor(level));
-            container.appendChild(btn);
-        });
-    }
-
-    const floorSelect = document.getElementById("edit-panel-floor");
-    if (floorSelect) {
-        floorSelect.innerHTML = "";
-        floors.forEach(level => {
-            const option = document.createElement("option");
-            option.value = level;
-            option.textContent = `Level ${level}`;
-            floorSelect.appendChild(option);
-        });
-    }
+    MallKit.buildFloorControls(floors, switchFloor, "edit-panel-floor");
 
     activeFloor = floors[0] || "1";
     floorLayer(activeFloor).addTo(map);
-    const activeBtn = document.querySelector(`.floor-btn[data-floor="${activeFloor}"]`);
-    if (activeBtn) activeBtn.classList.add("active");
+    MallKit.markActiveFloorButton(activeFloor);
 
     // Fit to every floor, not just the first one: floors rarely share a
     // footprint, and fitting to the smallest opens the editor zoomed into a
     // corner of the centre.
-    let bounds = null;
-    floors.forEach(level => {
-        const b = floorLayer(level).getBounds();
-        if (!b || !b.isValid()) return;
-        bounds = bounds ? bounds.extend(b) : L.latLngBounds(b.getSouthWest(), b.getNorthEast());
-    });
+    const bounds = MallKit.combinedBounds(floorLayers, floors);
     if (bounds && bounds.isValid()) {
-        fitWhenSized(bounds);
-        // Longitude degrees shrink with latitude; use the fitted centre so the
-        // view cones are drawn to the same scale the simulation measures with.
-        LON_DEG_TO_M = 111320.0 * Math.cos(bounds.getCenter().lat * Math.PI / 180);
+        MallKit.fitWhenSized(map, bounds);
+        LON_DEG_TO_M = MallKit.lonDegToM(bounds.getCenter().lat);
     }
 
     renderPanelsGrid();
     renderPanelMarkers();
-}
-
-// Fit once the map container has a real size.
-//
-// initFloors() can run before the stylesheet has been applied, and while
-// Leaflet still measures the container as 0x0 it resolves ANY bounds to
-// maxZoom -- which opens the editor blank, zoomed into a few square metres.
-// Waiting for a non-zero size costs a frame or two and is the difference
-// between a usable first view and an apparently broken one.
-function fitWhenSized(bounds, attemptsLeft = 60) {
-    map.invalidateSize();
-    const size = map.getSize();
-    if (size.x > 0 && size.y > 0) {
-        map.fitBounds(bounds, { padding: [10, 10] });
-        return;
-    }
-    if (attemptsLeft > 0) {
-        requestAnimationFrame(() => fitWhenSized(bounds, attemptsLeft - 1));
-    }
-}
-
-// Offer the other malls as links, so switching does not mean editing the URL.
-function initMallSwitcher() {
-    const container = document.getElementById("mall-switcher");
-    if (!container || !mallConfig.allKeys) return;
-    container.innerHTML = "";
-    mallConfig.allKeys.forEach(key => {
-        const link = document.createElement("a");
-        link.href = `?mall=${encodeURIComponent(key)}`;
-        link.textContent = key;
-        link.className = "mall-link" + (key === mallConfig.key ? " active" : "");
-        container.appendChild(link);
-    });
 }
 
 // Render Panel Markers on Map
@@ -719,7 +565,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // Resolve the mall first: everything else depends on which files to fetch.
     loadMallConfig()
         .then(() => {
-            initMallSwitcher();
+            MallKit.initSwitcher(mallConfig);
             return Promise.all([loadBackdrop(), loadPanels()]);
         })
         .then(() => {
