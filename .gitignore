@@ -1,0 +1,9 @@
+.venv/
+.bqenv/
+__pycache__/
+*.py[cod]
+.env
+**/credentials/
+geo-reach*.json
+results/*.csv
+results/*.log
