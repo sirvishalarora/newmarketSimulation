@@ -1,5 +1,17 @@
+"""Translate a curated zone-schema topology into the OSM vocabulary the graph
+builder reads, reprojecting EPSG:3857 -> EPSG:4326 on the way.
+
+Only malls whose topology was hand-drawn in the zone schema (zone_type /
+zone_name / floor_level) need this stage. A mall exported straight from OSM is
+already in the target vocabulary and CRS, and its Mall entry sets
+source_topology=None.
+"""
+
+import argparse
 import json
 import math
+
+import malls
 
 def reproject_point(x, y):
     # Convert EPSG:3857 to EPSG:4326 (longitude and latitude)
@@ -36,12 +48,7 @@ def get_centroid(coords):
         return [0, 0]
     return [sum(xs)/len(xs), sum(ys)/len(ys)]
 
-with open("Westfield_NewMarket_topology.geojson", "r") as f:
-    data = json.load(f)
-
-new_features = []
-
-for f in data.get("features", []):
+def convert_feature(f):
     props = f.get("properties", {})
     geom = f.get("geometry", {})
     geom_type = geom.get("type")
@@ -125,21 +132,46 @@ for f in data.get("features", []):
                 "name": zone_name
             }
             
-    new_feature = {
+    return {
         "type": "Feature",
         "properties": new_props,
         "geometry": new_geom
     }
-    new_features.append(new_feature)
 
-output_data = {
-    "type": "FeatureCollection",
-    "name": "Westfield_NewMarket_topology_4326",
-    "features": new_features
-}
 
-with open("Westfield_NewMarket_topology_4326.geojson", "w") as f:
-    json.dump(output_data, f, indent=2)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    malls.add_mall_argument(parser)
+    args = parser.parse_args()
+    mall = malls.resolve(args.mall)
 
-print("Conversion complete! Saved Westfield_NewMarket_topology_4326.geojson")
-print(f"Total features converted: {len(new_features)}")
+    if mall.source_topology is None:
+        raise SystemExit(
+            f"{mall.name} has no curated source topology -- {mall.topology} is "
+            "already OSM-flavoured 4326, so this stage does not apply. "
+            "Run generate_graph.py directly."
+        )
+
+    src = mall.path("source_topology")
+    dst = mall.path("topology")
+
+    with src.open() as f:
+        data = json.load(f)
+
+    new_features = [convert_feature(f) for f in data.get("features", [])]
+
+    output_data = {
+        "type": "FeatureCollection",
+        "name": dst.stem,
+        "features": new_features
+    }
+
+    with dst.open("w") as f:
+        json.dump(output_data, f, indent=2)
+
+    print(f"Conversion complete! Saved {dst.name}")
+    print(f"Total features converted: {len(new_features)}")
+
+
+if __name__ == "__main__":
+    main()

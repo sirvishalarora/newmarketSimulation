@@ -1,7 +1,16 @@
+import argparse
 import json
 
-def verify_graph():
-    with open("newmarket_graph.json", "r") as f:
+import malls
+
+def verify_graph(mall):
+    graph_path = mall.path("graph")
+    if not graph_path.exists():
+        raise SystemExit(
+            f"{mall.name}: no graph at {graph_path} -- "
+            f"run generate_graph.py --mall {mall.key} first"
+        )
+    with graph_path.open() as f:
         graph = json.load(f)
         
     nodes = graph.get("nodes", [])
@@ -98,4 +107,6 @@ def verify_graph():
         print(f"\nWarning: The graph has {len(components)} components. Agents in smaller components might be isolated.")
 
 if __name__ == "__main__":
-    verify_graph()
+    parser = argparse.ArgumentParser(description="Sanity-check a mall navigation graph")
+    malls.add_mall_argument(parser)
+    verify_graph(malls.resolve(parser.parse_args().mall))

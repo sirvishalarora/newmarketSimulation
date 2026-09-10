@@ -1,9 +1,51 @@
+import argparse
 import json
 import math
+from collections import defaultdict
 
-# Coordinate translation helpers (meters per degree at Auckland latitude)
+import malls
+
+# Coordinate translation helpers (meters per degree at Auckland latitude).
+# LON_DEG_TO_M is latitude-dependent, so main() overwrites it from the mall.
 LAT_DEG_TO_M = 111000.0
 LON_DEG_TO_M = 88800.0  # at -36.87 deg lat
+
+
+def _level_sort_key(item):
+    """Sort (level, nodes) pairs numerically when levels are numeric."""
+    level = item[0]
+    try:
+        return (0, float(level), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(level))
+
+
+def level_as_int(level):
+    """Level as an int for vertical matching, or None if it is not numeric."""
+    try:
+        return int(float(level))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_level(raw, level_map):
+    """Canonicalise an OSM `level` value.
+
+    A curated topology already carries clean single-valued, 1-based levels and
+    passes through untouched. A raw OSM export does not: it is usually 0-based
+    and can tag a feature spanning two floors as "0;1". An explicit level_map
+    wins; otherwise take the first token so such a feature lands on its lower
+    floor. Features with no level at all return None and are skipped.
+    """
+    if raw is None:
+        return None
+    key = str(raw).strip()
+    if not key:
+        return None
+    if level_map and key in level_map:
+        return level_map[key]
+    first = key.split(";")[0].strip()
+    return first or None
 
 def get_centroid(geom):
     coords = geom.get("coordinates", [])
@@ -116,12 +158,32 @@ def get_bbox(coords):
     return min(xs), min(ys), max(xs), max(ys)
 
 def main():
-    print("Loading Westfield_NewMarket_topology_4326.geojson...")
-    with open("Westfield_NewMarket_topology_4326.geojson", "r") as f:
+    global LON_DEG_TO_M
+
+    parser = argparse.ArgumentParser(description="Build a mall navigation graph")
+    malls.add_mall_argument(parser)
+    args = parser.parse_args()
+    mall = malls.resolve(args.mall)
+    LON_DEG_TO_M = mall.lon_deg_to_m
+
+    topology_path = mall.path("topology")
+    print(f"Loading {topology_path.name} for {mall.name}...")
+    with topology_path.open() as f:
         data = json.load(f)
-        
+
     features = data.get("features", [])
-    
+
+    # Canonicalise levels once, up front, so every downstream read (node levels,
+    # per-level corridor filtering, vertical matching) sees the same vocabulary.
+    dropped_no_level = 0
+    for feat in features:
+        props = feat.setdefault("properties", {})
+        props["level"] = normalize_level(props.get("level"), mall.level_map)
+        if props["level"] is None:
+            dropped_no_level += 1
+    if dropped_no_level:
+        print(f"  {dropped_no_level} features carry no usable level and are skipped")
+
     # Classify features
     corridors = []
     escalators = []
@@ -134,8 +196,11 @@ def main():
         geom = f.get("geometry", {})
         gtype = geom.get("type")
         name = props.get("name", "")
-        level = props.get("level", "1")
-        
+        level = props.get("level")
+
+        if level is None:
+            continue
+
         # Corridors
         if props.get("indoor") == "corridor":
             corridors.append(f)
@@ -165,9 +230,11 @@ def main():
     edges = []
     node_id_counter = 0
     
-    # Store nodes by level for easier linking
-    level_grid_nodes = {"1": [], "2": [], "3": []}
-    special_nodes_by_level = {"1": [], "2": [], "3": []}
+    # Store nodes by level for easier linking. Levels come from the topology
+    # rather than a fixed 1/2/3 list so a mall with any number of floors works;
+    # iteration is sorted so edge ordering stays deterministic between runs.
+    level_grid_nodes = defaultdict(list)
+    special_nodes_by_level = defaultdict(list)
     
     # 1. Generate grid nodes inside corridor polygons
     # Auckland step size: lat_step = 0.000045 (~5m), lon_step = 0.000056 (~5m)
@@ -306,7 +373,7 @@ def main():
     # Max distance: 10 meters
     max_link_dist = 10.0
     print("\nConnecting corridor grid nodes...")
-    for level, gnodes in level_grid_nodes.items():
+    for level, gnodes in sorted(level_grid_nodes.items(), key=_level_sort_key):
         print(f"  Level {level}: Connecting {len(gnodes)} grid nodes...")
         level_corridors = [c for c in corridors if c["properties"].get("level") == level]
         
@@ -338,7 +405,7 @@ def main():
                         
     # 4. Connect Special Nodes to the nearest walkable corridor grid nodes
     print("\nConnecting entrances, escalators, and elevators to grid...")
-    for level, snodes in special_nodes_by_level.items():
+    for level, snodes in sorted(special_nodes_by_level.items(), key=_level_sort_key):
         gnodes = level_grid_nodes[level]
         level_corridors = [c for c in corridors if c["properties"].get("level") == level]
         
@@ -413,9 +480,11 @@ def main():
             # Check if levels are adjacent or connect directly (e.g. L1 to L2, L2 to L3)
             # Make sure we don't connect L1 to L3 directly if there is no intermediate node
             # (or we can connect them if they represent the same elevator shaft)
-            l1 = int(e1["level"])
-            l2 = int(e2["level"])
-            
+            l1 = level_as_int(e1["level"])
+            l2 = level_as_int(e2["level"])
+            if l1 is None or l2 is None:
+                continue
+
             if l1 + 1 == l2:
                 dist_2d = distance_m(p1, [e2["x"], e2["y"]])
                 if dist_2d < 15.0: # Spatially aligned
@@ -441,9 +510,11 @@ def main():
             if esc1["id"] == esc2["id"]:
                 continue
             
-            l1 = int(esc1["level"])
-            l2 = int(esc2["level"])
-            
+            l1 = level_as_int(esc1["level"])
+            l2 = level_as_int(esc2["level"])
+            if l1 is None or l2 is None:
+                continue
+
             if l1 + 1 == l2:
                 dist_2d = distance_m(p1, [esc2["x"], esc2["y"]])
                 if dist_2d < 20.0: # Spatially aligned
@@ -475,11 +546,12 @@ def main():
         "edges": edges
     }
     
-    output_filename = "newmarket_graph.json"
-    with open(output_filename, "w") as f:
+    output_path = mall.path("graph")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as f:
         json.dump(graph_data, f, indent=2)
-        
-    print(f"\nSaved graph to {output_filename} successfully!")
+
+    print(f"\nSaved graph to {output_path.name} successfully!")
     print(f"Graph stats: {len(filtered_nodes)} nodes, {len(edges)} edges")
 
 if __name__ == "__main__":

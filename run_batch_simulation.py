@@ -19,14 +19,23 @@ import time
 from multiprocessing import get_context
 from pathlib import Path
 
+import malls
+
 ROOT = Path(__file__).resolve().parent
-OUT_DIR = ROOT / "results"
+
+# Mall-dependent settings. apply_mall() overwrites all of these before any
+# simulation state is built; the defaults keep the module importable on its own.
+MALL = malls.resolve(malls.DEFAULT_MALL)
+OUT_DIR = ROOT / MALL.results_dir
+PANELS_PATH = MALL.path("panels")
+GRAPH_PATH = MALL.path("graph")
+WATCH_PANELS = MALL.watch_panels
 
 LAT_DEG_TO_M = 111000.0
-LON_DEG_TO_M = 88800.0
+LON_DEG_TO_M = MALL.lon_deg_to_m
 
-WEEKLY_VISITS = 200_000
-WEEKLY_UNIQUES = 123_000
+WEEKLY_VISITS = MALL.weekly_visits
+WEEKLY_UNIQUES = MALL.weekly_uniques
 DAILY_WEIGHTS = [0.11, 0.12, 0.13, 0.145, 0.165, 0.195, 0.135]
 MIN_SHOP_VISITS = 2
 MAX_SHOP_VISITS = 4
@@ -140,14 +149,13 @@ class Panel:
 
 
 def load_panels() -> list[Panel]:
-    path = ROOT / "panel_locations_with_floor.csv"
-    with path.open(newline="") as f:
+    with PANELS_PATH.open(newline="") as f:
         rows = list(csv.DictReader(f))
     return [Panel(r, WEEKLY_UNIQUES) for r in rows]
 
 
 def load_graph():
-    with (ROOT / "newmarket_graph.json").open() as f:
+    with GRAPH_PATH.open() as f:
         data = json.load(f)
     nodes = {n["id"]: n for n in data["nodes"]}
     adj: dict[str, list[tuple[str, float]]] = {nid: [] for nid in nodes}
@@ -753,6 +761,19 @@ def write_pair_overlap(panels: list[Panel], path: Path):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run weekly mall panel simulation batch")
+    malls.add_mall_argument(p)
+    p.add_argument(
+        "--weekly-visits",
+        type=int,
+        default=None,
+        help="Weekly mall visits; required for a mall with no configured figure",
+    )
+    p.add_argument(
+        "--weekly-uniques",
+        type=int,
+        default=None,
+        help="Weekly unique visitor pool; required for a mall with no configured figure",
+    )
     p.add_argument("--routing", choices=("shortest", "segment_logit"), default=ROUTING_MODE)
     p.add_argument("--route-beta", type=float, default=ROUTE_BETA_PROGRESS)
     p.add_argument("--route-randomness", type=float, default=ROUTE_RANDOMNESS)
@@ -790,11 +811,53 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
+def apply_mall(args) -> None:
+    """Bind every mall-dependent global before any simulation state is built.
+
+    Worker processes are forked after this runs, so they inherit these values;
+    nothing here may be deferred until after the pool starts.
+    """
+    global MALL, OUT_DIR, PANELS_PATH, GRAPH_PATH, WATCH_PANELS
+    global LON_DEG_TO_M, WEEKLY_VISITS, WEEKLY_UNIQUES
+
+    MALL = malls.resolve(args.mall)
+    OUT_DIR = ROOT / MALL.results_dir
+    PANELS_PATH = MALL.path("panels")
+    GRAPH_PATH = MALL.path("graph")
+    WATCH_PANELS = MALL.watch_panels
+    LON_DEG_TO_M = MALL.lon_deg_to_m
+
+    WEEKLY_VISITS = args.weekly_visits or MALL.weekly_visits
+    WEEKLY_UNIQUES = args.weekly_uniques or MALL.weekly_uniques
+    missing = [
+        flag
+        for flag, value in (
+            ("--weekly-visits", WEEKLY_VISITS),
+            ("--weekly-uniques", WEEKLY_UNIQUES),
+        )
+        if value is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"{MALL.name} has no configured footfall -- pass {' and '.join(missing)}. "
+            "These drive every reach number, so they are not defaulted."
+        )
+    if WEEKLY_UNIQUES > WEEKLY_VISITS:
+        raise SystemExit(
+            f"weekly uniques ({WEEKLY_UNIQUES:,}) cannot exceed weekly visits "
+            f"({WEEKLY_VISITS:,})"
+        )
+
+    for attr in ("panels", "graph"):
+        path = MALL.path(attr)
+        if not path.exists():
+            raise SystemExit(f"{MALL.name}: missing {attr} input {path}")
+
+
+def main(args):
     global ROUTING_MODE, ROUTE_BETA_PROGRESS, ROUTE_RANDOMNESS, ROUTE_ZONE_BOOST, ROUTE_BETA_VERTICAL
     global STEP_METERS, USE_NUMBA
 
-    args = parse_args()
     ROUTING_MODE = args.routing
     ROUTE_BETA_PROGRESS = args.route_beta
     ROUTE_RANDOMNESS = args.route_randomness
@@ -803,9 +866,10 @@ def main():
     STEP_METERS = max(0.5, args.step_meters)
     USE_NUMBA = not args.no_numba and NUMBA_AVAILABLE
 
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     workers = 1 if args.workers <= 1 else args.workers
+    print(f"Simulating {MALL.name} (site {MALL.site_id})")
     print("Preparing memory...")
     prepare_for_simulation(args.kill_server, args.server_port, workers, USE_NUMBA)
 
@@ -874,17 +938,19 @@ def main():
     for p in top:
         print(f"  Panel {p.id} (L{p.floor}): reach={p.reach.count():,}, contacts={p.contacts:,}")
 
-    watch = ["27052", "27053", "27054"]
-    print("\nEscalator-branch panels:")
-    by_id = {p.id: p for p in panels}
-    for pid in watch:
-        p = by_id.get(pid)
-        if p:
-            print(f"  Panel {pid}: reach={p.reach.count():,}, contacts={p.contacts:,}")
+    if WATCH_PANELS:
+        print("\nEscalator-branch panels:")
+        by_id = {p.id: p for p in panels}
+        for pid in WATCH_PANELS:
+            p = by_id.get(pid)
+            if p:
+                print(f"  Panel {pid}: reach={p.reach.count():,}, contacts={p.contacts:,}")
 
 
 if __name__ == "__main__":
+    _args = parse_args()
+    apply_mall(_args)
     plan = build_trip_plan(WEEKLY_VISITS)
     assert len(plan) == WEEKLY_VISITS
     assert len({p for _, p in plan}) == WEEKLY_UNIQUES, "full pool coverage when trips >= uniques"
-    main()
+    main(_args)
