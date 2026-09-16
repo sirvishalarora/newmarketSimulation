@@ -790,6 +790,7 @@ def write_reach_bitsets(panels: list[Panel], path: Path):
         panel_ids=np.array([p.id for p in plist]),
         reach_bits=np.stack([np.frombuffer(bytes(p.reach.data), dtype=np.uint8) for p in plist]),
         weekly_uniques=np.array(WEEKLY_UNIQUES),
+        contacts=np.array([p.contacts for p in plist], dtype=np.int64),
     )
 
 
