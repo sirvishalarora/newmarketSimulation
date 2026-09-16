@@ -7,5 +7,7 @@ __pycache__/
 geo-reach*.json
 results/*.csv
 results/*.log
+results/*.npz
 results/**/*.csv
 results/**/*.log
+results/**/*.npz

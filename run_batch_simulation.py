@@ -771,6 +771,28 @@ def write_pair_overlap(panels: list[Panel], path: Path):
                 w.writerow([a.id, b.id, ra, rb, shared, f"{coef:.6f}", f"{jaccard:.6f}"])
 
 
+def write_reach_bitsets(panels: list[Panel], path: Path):
+    """Persist each panel's raw per-agent exposure bitset.
+
+    panel_metrics.csv and panel_pair_overlap.csv only ever emit single-panel
+    and pairwise aggregates. Any panel *combination* beyond a pair -- an
+    arbitrary selection across floors, or across malls -- needs the same
+    ground truth the simulation itself computes reach from: which of the
+    WEEKLY_UNIQUES agent ids passed each panel's view cone. OR-ing the
+    selected panels' rows together and popcounting is the exact reach the
+    simulation would report for that combination, not an approximation of it.
+    """
+    import numpy as np
+
+    plist = sorted(panels, key=lambda p: p.id)
+    np.savez_compressed(
+        path,
+        panel_ids=np.array([p.id for p in plist]),
+        reach_bits=np.stack([np.frombuffer(bytes(p.reach.data), dtype=np.uint8) for p in plist]),
+        weekly_uniques=np.array(WEEKLY_UNIQUES),
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Run weekly mall panel simulation batch")
     malls.add_mall_argument(p)
@@ -936,6 +958,7 @@ def main(args):
     pair_path = OUT_DIR / "panel_pair_overlap.csv"
     write_panel_metrics(panels, panel_path)
     write_pair_overlap(panels, pair_path)
+    write_reach_bitsets(panels, OUT_DIR / "panel_reach_bitsets.npz")
 
     total_contacts = sum(p.contacts for p in panels)
     union_reach = Bitset(WEEKLY_UNIQUES)
