@@ -88,11 +88,17 @@ def distance_m(x1, y1, x2, y2) -> float:
     return math.hypot(dx, dy)
 
 
-def get_store_category(name: str) -> str:
-    if not name:
-        return "specialty"
-    n = name.lower()
-    checks = [
+# Separators are stripped from both the node name and the keys before matching,
+# so a destination reads the same however its name is punctuated -- "Food Court",
+# "food_court" and "foodcourt" all land on the same category. Matching the raw
+# name meant Albany's "Food Court" (a space) missed both listed spellings and
+# fell through to "specialty", the weakest pull in the table, despite being that
+# mall's strongest draw. Verified to leave all 42 Newmarket destinations on the
+# categories they already had.
+_NAME_SEPARATORS = str.maketrans("", "", " _-&")
+_CATEGORY_CHECKS = tuple(
+    (cat, tuple(k.translate(_NAME_SEPARATORS) for k in keys))
+    for cat, keys in (
         ("farmers", ("farmers",)),
         ("davidjones", ("davidjones", "david jones")),
         ("hm", ("handm", "h&m", "hm")),
@@ -102,11 +108,19 @@ def get_store_category(name: str) -> str:
         ("noelleeming", ("noelleeming", "noel leeming", "noel_leeming")),
         ("archiebrothers", ("archiebrothers", "archie brothers", "archie_brothers", "archiebros")),
         ("rebelsport", ("rebelsport", "rebel sport", "rebel_sport")),
-    ]
-    for cat, keys in checks:
+    )
+)
+
+
+def get_store_category(name: str) -> str:
+    if not name:
+        return "specialty"
+    lowered = name.lower()
+    n = lowered.translate(_NAME_SEPARATORS)
+    for cat, keys in _CATEGORY_CHECKS:
         if any(k in n for k in keys):
             return cat
-    if n.startswith("rs_"):
+    if lowered.startswith("rs_"):
         return "rebelsport"
     return "specialty"
 
@@ -227,9 +241,34 @@ def build_escalator_zone_flags(nodes: dict) -> set[str]:
     return zone
 
 
+def curated_weight(node: dict) -> float | None:
+    """This destination's own pull, when the mall's topology carries one.
+
+    import_csv_topology.py already passes `weight` through from the node CSV
+    "for weighted destination choice", but nothing read it until now: Albany
+    supplies a curated weight for all 8 of its destinations (Food Court 9,
+    New World 8, Kmart 7 ...), and those were being discarded in favour of a
+    name-matched category, which rated five of the eight as generic specialty.
+    Newmarket carries no weights at all and keeps using CATEGORY_WEIGHTS.
+    """
+    raw = node.get("weight")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def build_category_counts(shop_nodes: list) -> dict[str, int]:
+    """Members per category, used to split a category's pull across the
+    destinations sharing it. Curated destinations are excluded: their weight
+    is already per-destination, not a category budget to divide up."""
     counts: dict[str, int] = {}
     for n in shop_nodes:
+        if curated_weight(n) is not None:
+            continue
         cat = get_store_category(n.get("name", ""))
         counts[cat] = counts.get(cat, 0) + 1
     return counts
@@ -434,8 +473,16 @@ def select_shop(current_id, last_id, shop_nodes, dist_matrix, cat_counts, rng):
     for node in shop_nodes:
         if node["id"] == last_id:
             continue
-        cat = get_store_category(node.get("name", ""))
-        base = max(0.001, CATEGORY_WEIGHTS.get(cat, 0.3) / cat_counts.get(cat, 1))
+        # Curated weights and CATEGORY_WEIGHTS are on different scales (Albany's
+        # run 3-9, the table's 0.12-0.75), which is harmless while each mall is
+        # wholly one or the other -- selection below is a roulette wheel over
+        # these weights, so scaling them all by a constant changes nothing. A
+        # mall that curated only some of its destinations would skew towards
+        # those, so curate all of them or none.
+        base = curated_weight(node)
+        if base is None:
+            cat = get_store_category(node.get("name", ""))
+            base = max(0.001, CATEGORY_WEIGHTS.get(cat, 0.3) / cat_counts.get(cat, 1))
         dist = dist_matrix[current_id].get(node["id"], math.inf)
         if dist == math.inf:
             continue
