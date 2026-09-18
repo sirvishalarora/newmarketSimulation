@@ -95,6 +95,7 @@ def _check_panels_at(
     panel_grid: Dict,
     person_idx: int,
     contacts: np.ndarray,
+    view_steps: np.ndarray,
     reach: np.ndarray,
     viewing_mask: np.ndarray,
 ) -> None:
@@ -119,12 +120,20 @@ def _check_panels_at(
         )
         bit = np.uint64(1) << np.uint64(pi)
         seen = (viewing_mask[0] & bit) != 0
-        if hit and not seen:
-            contacts[pi] += 1
-            _reach_add(reach, pi, person_idx)
-            viewing_mask[0] |= bit
-        elif not hit and seen:
-            viewing_mask[0] &= ~bit
+        if hit:
+            # Every sample inside the cone is STEP_METERS of travel spent in
+            # front of the panel. Summed over the trip this IS the dwell, so
+            # impressions no longer need one assumed for them.
+            view_steps[pi] += 1
+            if not seen:
+                contacts[pi] += 1
+                _reach_add(reach, pi, person_idx)
+                viewing_mask[0] |= bit
+        # Deliberately NOT cleared on leaving the cone. A contact is one
+        # opportunity to see, and walking back past the same screen later in
+        # the same trip is not a second one -- it is the same shopper on the
+        # same visit. The mask is reset per trip (simulate_trip), so a
+        # genuinely separate visit does count again.
 
 
 @njit(cache=True)
@@ -142,6 +151,7 @@ def _walk_single_edge(
     panel_grid: Dict,
     person_idx: int,
     contacts: np.ndarray,
+    view_steps: np.ndarray,
     reach: np.ndarray,
     viewing_mask: np.ndarray,
 ) -> None:
@@ -173,6 +183,7 @@ def _walk_single_edge(
             panel_grid,
             person_idx,
             contacts,
+            view_steps,
             reach,
             viewing_mask,
         )
@@ -269,6 +280,7 @@ def walk_segment_choice_numba(
     panel_grid: Dict,
     person_idx: int,
     contacts: np.ndarray,
+    view_steps: np.ndarray,
     reach: np.ndarray,
     viewing_mask: np.ndarray,
     rng_state: np.ndarray,
@@ -313,6 +325,7 @@ def walk_segment_choice_numba(
             panel_grid,
             person_idx,
             contacts,
+            view_steps,
             reach,
             viewing_mask,
         )
@@ -334,6 +347,7 @@ def walk_path_numba(
     panel_grid: Dict,
     person_idx: int,
     contacts: np.ndarray,
+    view_steps: np.ndarray,
     reach: np.ndarray,
     viewing_mask: np.ndarray,
 ) -> None:
@@ -352,6 +366,7 @@ def walk_path_numba(
             panel_grid,
             person_idx,
             contacts,
+            view_steps,
             reach,
             viewing_mask,
         )
@@ -574,6 +589,7 @@ def walk_route_fast(
     target_id: str,
     person_idx: int,
     contacts: np.ndarray,
+    view_steps: np.ndarray,
     reach: np.ndarray,
     viewing_mask: np.ndarray,
     rng_state: np.ndarray,
@@ -616,6 +632,7 @@ def walk_route_fast(
             fast.panel_grid,
             person_idx,
             contacts,
+            view_steps,
             reach,
             viewing_mask,
             rng_state,
@@ -637,14 +654,18 @@ def walk_route_fast(
             fast.panel_grid,
             person_idx,
             contacts,
+            view_steps,
             reach,
             viewing_mask,
         )
 
 
-def apply_fast_metrics(panels: list, contacts: np.ndarray, reach: np.ndarray) -> None:
+def apply_fast_metrics(
+    panels: list, contacts: np.ndarray, view_steps: np.ndarray, reach: np.ndarray
+) -> None:
     for i, panel in enumerate(panels):
         panel.contacts += int(contacts[i])
+        panel.view_steps += int(view_steps[i])
         other = reach[i]
         for j in range(len(panel.reach.data)):
             panel.reach.data[j] |= other[j]
@@ -668,6 +689,7 @@ def warmup() -> None:
     panel_floor = np.array([1], dtype=np.int32)
     panel_orientation = np.array([0.0], dtype=np.float64)
     contacts = np.zeros(1, dtype=np.int64)
+    view_steps = np.zeros(1, dtype=np.int64)
     reach = np.zeros((1, 1), dtype=np.uint8)
     viewing_mask = np.zeros(1, dtype=np.uint64)
     rng_state = init_rng_state(0)
@@ -695,6 +717,7 @@ def warmup() -> None:
         grid,
         0,
         contacts,
+        view_steps,
         reach,
         viewing_mask,
         rng_state,

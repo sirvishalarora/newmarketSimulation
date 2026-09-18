@@ -43,6 +43,10 @@ DECAY_EXPONENT = 1.3
 MAX_VIEW_DIST = 15.0
 CONE_ANGLE = 60.0
 STEP_METERS = 2.0
+# Average walking pace, for turning samples inside a view cone into seconds of
+# dwell. 1.4 m/s is the standard adult walking speed used in pedestrian
+# modelling; a shopper browsing is slower, so this is the conservative end.
+WALKING_SPEED_MPS = 1.4
 GRID_CELL_M = 15.0
 USE_NUMBA = True
 
@@ -160,7 +164,7 @@ class Bitset:
 
 
 class Panel:
-    __slots__ = ("id", "lon", "lat", "floor", "orientation", "reach", "contacts")
+    __slots__ = ("id", "lon", "lat", "floor", "orientation", "reach", "contacts", "view_steps")
 
     def __init__(self, row: dict, reach_size: int):
         self.id = row["panel_id"]
@@ -170,6 +174,9 @@ class Panel:
         self.orientation = float(row["orientation"])
         self.reach = Bitset(reach_size)
         self.contacts = 0
+        # Samples spent inside this panel's view cone, summed over every trip.
+        # x STEP_METERS / WALKING_SPEED_MPS gives the dwell in seconds.
+        self.view_steps = 0
 
 
 def load_panels() -> list[Panel]:
@@ -336,12 +343,14 @@ def check_panels(x, y, floor, n1, n2, person_idx, panel_grid, viewing: set[str])
         pid = panel.id
         seen = pid in viewing
         hit = in_panel_view(x, y, floor, n1, n2, panel)
-        if hit and not seen:
-            panel.contacts += 1
-            panel.reach.add(person_idx)
-            viewing.add(pid)
-        elif not hit and seen:
-            viewing.discard(pid)
+        if hit:
+            panel.view_steps += 1
+            if not seen:
+                panel.contacts += 1
+                panel.reach.add(person_idx)
+                viewing.add(pid)
+        # Not discarded on leaving the cone -- see sim_fast._check_panels_at.
+        # One contact per panel per trip; the mask resets when the trip does.
 
 
 def walk_single_edge(n1, n2, person_idx, nodes, panel_grid, viewing: set[str]):
@@ -523,6 +532,7 @@ def simulate_trip(
     ctx: dict,
     panels: list[Panel],
     fast_contacts=None,
+    fast_view_steps=None,
     fast_reach=None,
 ):
     rng = random.Random(42 + trip_index)
@@ -549,6 +559,7 @@ def simulate_trip(
                     target["id"],
                     person_idx,
                     fast_contacts,
+                    fast_view_steps,
                     fast_reach,
                     viewing_mask,
                     rng_state,
@@ -584,6 +595,7 @@ def simulate_trip(
                 exit_node["id"],
                 person_idx,
                 fast_contacts,
+                fast_view_steps,
                 fast_reach,
                 viewing_mask,
                 rng_state,
@@ -726,7 +738,7 @@ def _init_worker(ctx: dict) -> None:
     _SIM["ctx"] = ctx
 
 
-def run_trip_chunk(chunk: list[tuple[int, int]]) -> list[tuple[str, bytes, int]]:
+def run_trip_chunk(chunk: list[tuple[int, int]]) -> list[tuple[str, bytes, int, int]]:
     base_ctx = _SIM["ctx"]
     panels = load_panels()
     fast = base_ctx.get("fast")
@@ -736,22 +748,24 @@ def run_trip_chunk(chunk: list[tuple[int, int]]) -> list[tuple[str, bytes, int]]
         ctx = {**base_ctx, "panel_grid": build_panel_grid(panels)}
     if fast is not None:
         fast_contacts = np.zeros(len(panels), dtype=np.int64)
+        fast_view_steps = np.zeros(len(panels), dtype=np.int64)
         fast_reach = np.zeros((len(panels), fast.reach_bytes), dtype=np.uint8)
         for trip_index, person_idx in chunk:
-            simulate_trip(trip_index, person_idx, ctx, panels, fast_contacts, fast_reach)
-        apply_fast_metrics(panels, fast_contacts, fast_reach)
+            simulate_trip(trip_index, person_idx, ctx, panels, fast_contacts, fast_view_steps, fast_reach)
+        apply_fast_metrics(panels, fast_contacts, fast_view_steps, fast_reach)
     else:
         for trip_index, person_idx in chunk:
             simulate_trip(trip_index, person_idx, ctx, panels)
-    return [(p.id, bytes(p.reach.data), p.contacts) for p in panels]
+    return [(p.id, bytes(p.reach.data), p.contacts, p.view_steps) for p in panels]
 
 
-def merge_chunk_results(panels: list[Panel], chunks: list[list[tuple[str, bytes, int]]]) -> None:
+def merge_chunk_results(panels: list[Panel], chunks: list[list[tuple[str, bytes, int, int]]]) -> None:
     by_id = {p.id: p for p in panels}
     for chunk in chunks:
-        for pid, reach_data, contacts in chunk:
+        for pid, reach_data, contacts, view_steps in chunk:
             panel = by_id[pid]
             panel.contacts += contacts
+            panel.view_steps += view_steps
             other = Bitset(WEEKLY_UNIQUES)
             other.data = bytearray(reach_data)
             panel.reach.union_with(other)
@@ -764,16 +778,17 @@ def run_sequential(trip_plan: list[tuple[int, int]], panels: list[Panel], ctx: d
     fast = ctx.get("fast")
     if fast is not None:
         fast_contacts = np.zeros(len(panels), dtype=np.int64)
+        fast_view_steps = np.zeros(len(panels), dtype=np.int64)
         fast_reach = np.zeros((len(panels), fast.reach_bytes), dtype=np.uint8)
         for trip_index, person_idx in trip_plan:
-            simulate_trip(trip_index, person_idx, ctx, panels, fast_contacts, fast_reach)
+            simulate_trip(trip_index, person_idx, ctx, panels, fast_contacts, fast_view_steps, fast_reach)
             done += 1
             if done % 10000 == 0:
                 elapsed = time.time() - t0
                 rate = done / elapsed if elapsed else 0
                 eta = (total - done) / rate if rate else 0
                 print(f"  {done:,}/{total:,} trips ({rate:.0f}/s, ETA {eta/60:.1f}m)", flush=True)
-        apply_fast_metrics(panels, fast_contacts, fast_reach)
+        apply_fast_metrics(panels, fast_contacts, fast_view_steps, fast_reach)
         return
 
     for trip_index, person_idx in trip_plan:
@@ -856,6 +871,11 @@ def write_reach_bitsets(panels: list[Panel], path: Path):
         reach_bits=np.stack([np.frombuffer(bytes(p.reach.data), dtype=np.uint8) for p in plist]),
         weekly_uniques=np.array(WEEKLY_UNIQUES),
         contacts=np.array([p.contacts for p in plist], dtype=np.int64),
+        # Seconds spent inside each panel's view cone, summed over every trip.
+        # Lets the consumer derive a real dwell per contact instead of assuming one.
+        view_seconds=np.array(
+            [p.view_steps * STEP_METERS / WALKING_SPEED_MPS for p in plist], dtype=np.float64
+        ),
     )
 
 
