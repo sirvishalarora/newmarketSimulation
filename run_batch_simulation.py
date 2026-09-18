@@ -48,7 +48,16 @@ USE_NUMBA = True
 
 # Segment-choice routing defaults (match app.js)
 ROUTING_MODE = "segment_logit"
-ROUTE_BETA_PROGRESS = 0.08
+# Steering strength toward the target, applied to a DIMENSIONLESS progress
+# term (see choose_next_node). Was 0.08 against progress measured in raw
+# metres, which made the pull scale with the graph's edge length: Albany's
+# 11.3m median edge gave a score of ~0.90 against unit-scale Gumbel noise,
+# Newmarket's 8.0m edge only ~0.64, so the same parameter produced a
+# materially more diffusive walk on the more finely meshed mall. 0.9 is the
+# scale-invariant equivalent of the old value at Albany's edge length, and
+# reproduces Albany's walk (~2,300 m and ~18 contacts per trip) while cutting
+# Newmarket's from 5,885 m / 252 contacts to 2,477 m / 105.
+ROUTE_BETA_PROGRESS = 0.9
 ROUTE_RANDOMNESS = 1.0
 ROUTE_ZONE_BOOST = 0.35
 ROUTE_BETA_VERTICAL = 0.5
@@ -371,6 +380,7 @@ def choose_next_node(
         return prev_id
 
     target_node = nodes[target_id]
+    cur_node = nodes[current_id]
     total = 0.0
     weighted: list[tuple[str, float]] = []
     cur_dist = dist_row[cur_i]
@@ -378,11 +388,19 @@ def choose_next_node(
         vi = node_index[v]
         if dist_row[vi] == math.inf:
             continue
-        progress = cur_dist - dist_row[vi]
+        vn = nodes[v]
+        # Progress as a fraction of this edge's own length: +1 heads straight
+        # at the target, -1 straight away. Dimensionless, so ROUTE_BETA_PROGRESS
+        # means the same thing however finely the graph is meshed -- see that
+        # constant for what taking the raw metres cost.
+        seg = math.hypot(
+            (cur_node["x"] - vn["x"]) * LON_DEG_TO_M,
+            (cur_node["y"] - vn["y"]) * LAT_DEG_TO_M,
+        )
+        progress = (cur_dist - dist_row[vi]) / max(seg, 1.0)
         score = ROUTE_BETA_PROGRESS * progress
         if v in escalator_zone:
             score += ROUTE_ZONE_BOOST
-        vn = nodes[v]
         if str(vn["level"]) != str(target_node["level"]) and vn["type"] in ("escalator", "elevator"):
             score += ROUTE_BETA_VERTICAL
         w = math.exp(score + ROUTE_RANDOMNESS * _gumbel(rng))
@@ -976,7 +994,9 @@ def main(args):
     ctx = build_sim_context(nodes, adj, spawn_nodes, shop_nodes, cat_counts, panel_grid, escalator_zone)
     if USE_NUMBA:
         print("  Building Numba walk context...", flush=True)
-        ctx["fast"] = build_fast_context(ctx, panels, STEP_METERS, len(panels[0].reach.data))
+        ctx["fast"] = build_fast_context(
+            ctx, panels, STEP_METERS, len(panels[0].reach.data), LON_DEG_TO_M
+        )
         print("  Warming up Numba JIT...", flush=True)
         warmup()
     dropped = trim_sim_context(ctx, USE_NUMBA, ROUTING_MODE)

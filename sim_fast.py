@@ -185,6 +185,7 @@ def _choose_next_node(
     target_i: int,
     adj_offsets: np.ndarray,
     adj_indices: np.ndarray,
+    adj_seg_len: np.ndarray,
     dist_row: np.ndarray,
     node_level: np.ndarray,
     node_is_vertical: np.ndarray,
@@ -211,7 +212,16 @@ def _choose_next_node(
             continue
         if dist_row[v] == math.inf:
             continue
-        progress = cur_dist - dist_row[v]
+        # Progress as a fraction of this edge's own length: +1 heads straight
+        # at the target, -1 straight away. Dimensionless, so route_beta means
+        # the same thing whatever resolution the graph is meshed at. Taking
+        # the raw metres instead made the steering strength scale with edge
+        # length, and a mall meshed at 8m edges got a materially weaker pull
+        # toward the target than one meshed at 11m -- a near-random walk.
+        seg = adj_seg_len[k]
+        if seg < 1.0:
+            seg = 1.0
+        progress = (cur_dist - dist_row[v]) / seg
         score = route_beta * progress
         if escalator_zone[v]:
             score += route_zone_boost
@@ -244,6 +254,7 @@ def walk_segment_choice_numba(
     node_is_vertical: np.ndarray,
     adj_offsets: np.ndarray,
     adj_indices: np.ndarray,
+    adj_seg_len: np.ndarray,
     dist_row: np.ndarray,
     escalator_zone: np.ndarray,
     route_beta: float,
@@ -275,6 +286,7 @@ def walk_segment_choice_numba(
             target_i,
             adj_offsets,
             adj_indices,
+            adj_seg_len,
             dist_row,
             node_level,
             node_is_vertical,
@@ -354,6 +366,7 @@ class FastWalkContext:
         "node_is_vertical",
         "adj_offsets",
         "adj_indices",
+        "adj_seg_len",
         "escalator_zone",
         "dist_to_target",
         "path_indices",
@@ -375,6 +388,7 @@ class FastWalkContext:
         node_is_vertical: np.ndarray,
         adj_offsets: np.ndarray,
         adj_indices: np.ndarray,
+        adj_seg_len: np.ndarray,
         escalator_zone: np.ndarray,
         dist_to_target: dict[str, np.ndarray],
         path_indices: dict[tuple[str, str], np.ndarray],
@@ -393,6 +407,7 @@ class FastWalkContext:
         self.node_is_vertical = node_is_vertical
         self.adj_offsets = adj_offsets
         self.adj_indices = adj_indices
+        self.adj_seg_len = adj_seg_len
         self.escalator_zone = escalator_zone
         self.dist_to_target = dist_to_target
         self.path_indices = path_indices
@@ -405,17 +420,44 @@ class FastWalkContext:
         self.reach_bytes = reach_bytes
 
 
-def _build_csr_adj(node_ids: list[str], adj_ids: dict[str, list[str]], node_index: dict[str, int]):
+def _build_csr_adj(
+    node_ids: list[str],
+    adj_ids: dict[str, list[str]],
+    node_index: dict[str, int],
+    node_x: np.ndarray,
+    node_y: np.ndarray,
+    lon_deg_to_m: float,
+):
+    """CSR adjacency, plus each edge's length in metres.
+
+    The lengths are precomputed here, in Python, rather than derived from
+    node_x/node_y inside the njit kernel: LON_DEG_TO_M is a module global that
+    numba bakes in at compile time, and with cache=True a kernel compiled for
+    one mall would carry that mall's constant into the next one. Passing the
+    metres in as data keeps each mall's own longitude scale (89241 for Albany,
+    88800 for Newmarket) attached to the graph it was built from.
+    """
     n = len(node_ids)
     adj_indices: list[int] = []
+    adj_seg_len: list[float] = []
     adj_offsets = np.zeros(n + 1, dtype=np.int32)
     for i, nid in enumerate(node_ids):
         for v in adj_ids.get(nid, []):
             vi = node_index.get(v)
             if vi is not None:
                 adj_indices.append(vi)
+                adj_seg_len.append(
+                    math.hypot(
+                        (node_x[i] - node_x[vi]) * lon_deg_to_m,
+                        (node_y[i] - node_y[vi]) * LAT_DEG_TO_M,
+                    )
+                )
         adj_offsets[i + 1] = len(adj_indices)
-    return adj_offsets, np.array(adj_indices, dtype=np.int32)
+    return (
+        adj_offsets,
+        np.array(adj_indices, dtype=np.int32),
+        np.array(adj_seg_len, dtype=np.float64),
+    )
 
 
 def _build_panel_grid_numba(
@@ -443,7 +485,9 @@ def _build_panel_grid_numba(
     return grid
 
 
-def build_fast_context(ctx: dict, panels: list, step_meters: float, reach_bytes: int) -> FastWalkContext:
+def build_fast_context(
+    ctx: dict, panels: list, step_meters: float, reach_bytes: int, lon_deg_to_m: float = LON_DEG_TO_M
+) -> FastWalkContext:
     if len(panels) > 64:
         raise ValueError("Numba fast path supports at most 64 panels (viewing bitmask)")
     nodes = ctx["nodes"]
@@ -462,7 +506,9 @@ def build_fast_context(ctx: dict, panels: list, step_meters: float, reach_bytes:
         node_level[i] = int(node["level"])
         node_is_vertical[i] = node["type"] in ("escalator", "elevator")
 
-    adj_offsets, adj_indices = _build_csr_adj(node_ids, ctx["adj_ids"], node_index)
+    adj_offsets, adj_indices, adj_seg_len = _build_csr_adj(
+        node_ids, ctx["adj_ids"], node_index, node_x, node_y, lon_deg_to_m
+    )
 
     escalator_zone = np.zeros(n, dtype=np.bool_)
     for nid in ctx["escalator_zone"]:
@@ -502,6 +548,7 @@ def build_fast_context(ctx: dict, panels: list, step_meters: float, reach_bytes:
         node_is_vertical=node_is_vertical,
         adj_offsets=adj_offsets,
         adj_indices=adj_indices,
+        adj_seg_len=adj_seg_len,
         escalator_zone=escalator_zone,
         dist_to_target=dist_to_target,
         path_indices=path_indices,
@@ -554,6 +601,7 @@ def walk_route_fast(
             fast.node_is_vertical,
             fast.adj_offsets,
             fast.adj_indices,
+            fast.adj_seg_len,
             dist_row,
             fast.escalator_zone,
             route_beta,
@@ -612,6 +660,7 @@ def warmup() -> None:
     node_is_vertical = np.array([False, False])
     adj_offsets = np.array([0, 1, 2], dtype=np.int32)
     adj_indices = np.array([1, 0], dtype=np.int32)
+    adj_seg_len = np.array([88.8, 88.8], dtype=np.float64)
     dist_row = np.array([100.0, 0.0], dtype=np.float64)
     escalator_zone = np.array([False, False])
     panel_lon = np.array([0.0], dtype=np.float64)
@@ -631,9 +680,10 @@ def warmup() -> None:
         node_is_vertical,
         adj_offsets,
         adj_indices,
+        adj_seg_len,
         dist_row,
         escalator_zone,
-        0.08,
+        0.9,
         1.0,
         0.35,
         0.5,
